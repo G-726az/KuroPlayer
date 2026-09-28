@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' cinema:; img-src 'self' cinema: data: blob: https:; media-src cinema: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<title>Kuro Player</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-play" viewBox="0 0 24 24"><path fill="currentColor" d="M8 5.14v13.72a1 1 0 0 0 1.52.85l11.1-6.86a1 1 0 0 0 0-1.7L9.52 4.29A1 1 0 0 0 8 5.14z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="4.5" width="4" height="15" rx="1.2" fill="currentColor"/><rect x="14" y="4.5" width="4" height="15" rx="1.2" fill="currentColor"/></symbol>
+    <symbol id="i-prev" viewBox="0 0 24 24"><path fill="currentColor" d="M6 5h2v14H6zM19 6.2v11.6a.8.8 0 0 1-1.22.68L9.6 12.68a.8.8 0 0 1 0-1.36l8.18-5.8A.8.8 0 0 1 19 6.2z"/></symbol>
+    <symbol id="i-next" viewBox="0 0 24 24"><path fill="currentColor" d="M16 5h2v14h-2zM5 6.2v11.6a.8.8 0 0 0 1.22.68l8.18-5.8a.8.8 0 0 0 0-1.36L6.22 5.52A.8.8 0 0 0 5 6.2z"/></symbol>
+    <symbol id="i-back10" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4h4"/><text x="12" y="15.6" text-anchor="middle" font-size="7.5" font-weight="700" fill="currentColor" font-family="Segoe UI, sans-serif">10</text></symbol>
+    <symbol id="i-fwd10" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M20 12a8 8 0 1 1-2.4-5.7M20 4v4h-4"/><text x="12" y="15.6" text-anchor="middle" font-size="7.5" font-weight="700" fill="currentColor" font-family="Segoe UI, sans-serif">10</text></symbol>
+    <symbol id="i-vol" viewBox="0 0 24 24"><path fill="currentColor" d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></symbol>
+    <symbol id="i-vol-low" viewBox="0 0 24 24"><path fill="currentColor" d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M15.5 9a4 4 0 0 1 0 6"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path fill="currentColor" d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M16 9.5l5 5M21 9.5l-5 5"/></symbol>
+    <symbol id="i-full" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+    <symbol id="i-exitfull" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></symbol>
+    <symbol id="i-color" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path fill="currentColor" d="M12 3.8a8.2 8.2 0 0 1 0 16.4z"/></symbol>
+    <symbol id="i-sub" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M7 12.5h3M13 12.5h4M7 15.5h6M15.5 15.5h1.5"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M12 8.6a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M19.4 13.5l1.6 1.2-1.9 3.3-1.9-.7a7.6 7.6 0 0 1-1.9 1.1l-.3 2h-3.8l-.3-2a7.6 7.6 0 0 1-1.9-1.1l-1.9.7L3 14.7l1.6-1.2a7.3 7.3 0 0 1 0-2.9L3 9.3 4.9 6l1.9.7a7.6 7.6 0 0 1 1.9-1.1l.3-2h3.8l.3 2a7.6 7.6 0 0 1 1.9 1.1l1.9-.7L21 9.3l-1.6 1.3a7.3 7.3 0 0 1 0 2.9z"/></symbol>
+    <symbol id="i-mini" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="12" y="11.5" width="7" height="6" rx="1.2" fill="currentColor"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.3" fill="currentColor"/><circle cx="4.5" cy="12" r="1.3" fill="currentColor"/><circle cx="4.5" cy="18" r="1.3" fill="currentColor"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path stroke="currentColor" stroke-width="1.9" stroke-linecap="round" d="M16 16l4.5 4.5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2.2h7a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="9" cy="10" r="1.8" fill="currentColor"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M4 17l5-4.5 3.5 3 3-2.5L20 17"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" d="M4 10.5L12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M20 11a8 8 0 0 0-14.3-4.3L4 8.5M4 4v4.5h4.5M4 13a8 8 0 0 0 14.3 4.3l1.7-1.8M20 20v-4.5h-4.5"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M4 8.5a2 2 0 0 1 2-2h2l1.5-2h5l1.5 2h2a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.5" r="3.4" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-speed" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M4.5 16.5a8 8 0 1 1 15 0"/><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 13l4-4"/><circle cx="12" cy="13" r="1.4" fill="currentColor"/></symbol>
+    <symbol id="i-audio" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M5 10v4M8.5 7v10M12 4.5v15M15.5 8v8M19 10.5v3"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M4 20h4L19 9l-4-4L4 16z"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></symbol>
+    <symbol id="i-theater" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M9 4h6l-1 5 3 3v2H7v-2l3-3zM12 14v6"/></symbol>
+    <symbol id="i-chev-l" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M15 5l-7 7 7 7"/></symbol>
+    <symbol id="i-chev-r" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></symbol>
+    <symbol id="i-compare" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path stroke="currentColor" stroke-width="1.8" d="M12 3v18"/><path fill="currentColor" opacity=".45" d="M12 6h6.5a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H12z"/></symbol>
+    <symbol id="i-rows" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="3.5" y="13" width="17" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.8"/><path stroke="currentColor" stroke-width="1.8" d="M9 4v7M9 13v7"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path fill="none" stroke="currentColor" stroke-width="1.8" d="M3.5 12h17M12 3.5c2.6 2.6 3.8 5.4 3.8 8.5s-1.2 5.9-3.8 8.5c-2.6-2.6-3.8-5.4-3.8-8.5S9.4 6.1 12 3.5z"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path fill="currentColor" d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.9l-5.2 2.8 1-5.9-4.3-4.1 5.9-.8z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M4.5 7h15M9.5 7V4.8h5V7M6.5 7l.9 12.2a1 1 0 0 0 1 .9h7.2a1 1 0 0 0 1-.9L17.5 7M10 11v5.5M14 11v5.5"/></symbol>
+    <symbol id="i-play-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path fill="currentColor" d="M10 8.5v7l5.5-3.5z"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3" fill="currentColor"/></symbol>
+    <symbol id="i-eye-off" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.9"/></symbol>
+    <symbol id="i-dice" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3.5" fill="none" stroke="currentColor" stroke-width="1.9"/><circle cx="8.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="15.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="8.5" cy="15.5" r="1.4" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.4" fill="currentColor"/></symbol>
+    <symbol id="i-glow" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="currentColor"/><path stroke="currentColor" stroke-width="1.9" stroke-linecap="round" d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path stroke="currentColor" stroke-width="2.1" stroke-linecap="round" d="M12 11v5.5"/><circle cx="12" cy="7.8" r="1.25" fill="currentColor"/></symbol>
+    <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M6 10h.01M9 10h.01M12 10h.01M15 10h.01M18 10h.01M8 14h8"/></symbol>
+  </defs>
+</svg>
+
+<!-- Fondo ambiental -->
+<div id="ambient" aria-hidden="true">
+  <div class="amb-img" id="amb-img"></div>
+  <div class="amb-blob b1"></div><div class="amb-blob b2"></div><div class="amb-blob b3"></div>
+  <div class="amb-noise"></div>
+</div>
+
+<header id="topbar">
+  <div class="brand" data-go="home">
+    <div class="brand-logo"><svg class="i"><use href="#i-play"/></svg></div>
+    <span>Kuro<b>Player</b></span>
+  </div>
+  <nav class="nav">
+    <button class="nav-btn active" data-go="home"><svg class="i"><use href="#i-home"/></svg>Inicio</button>
+    <button class="nav-btn" data-go="library"><svg class="i"><use href="#i-grid"/></svg>Cartelera</button>
+    <button class="nav-btn" id="nav-player" data-go="player" hidden><svg class="i"><use href="#i-play"/></svg>Reproduciendo</button>
+  </nav>
+  <label class="search glass">
+    <svg class="i"><use href="#i-search"/></svg>
+    <input id="search" type="search" placeholder="Buscar anime o capítulo..." autocomplete="off" spellcheck="false">
+    <kbd>Ctrl K</kbd>
+  </label>
+  <div class="top-actions">
+    <button class="btn glass" id="btn-add-folder"><svg class="i"><use href="#i-plus"/></svg>Agregar carpeta</button>
+    <button class="icon-btn glass" id="btn-rescan" title="Volver a escanear"><svg class="i"><use href="#i-refresh"/></svg></button>
+    <button class="icon-btn glass" id="btn-settings" title="Ajustes"><svg class="i"><use href="#i-gear"/></svg></button>
+  </div>
+</header>
+
+<main id="views">
+  <!-- INICIO -->
+  <section class="view active" id="view-home">
+    <div class="empty-state" id="empty-state" hidden>
+      <div class="empty-card glass">
+        <div class="empty-icon"><svg class="i"><use href="#i-folder"/></svg></div>
+        <h1>Tu videoteca está vacía</h1>
+        <p>Agrega la carpeta donde guardas tus animes. Cada subcarpeta se convertirá en una tarjeta de la cartelera y sus videos en capítulos.</p>
+        <p class="muted small">Tip: pon una imagen llamada <b>cover.jpg</b> o <b>portada.jpg</b> dentro de cada carpeta para usarla como portada (también <b>fondo.jpg</b> / <b>fanart.jpg</b> para el banner). También puedes elegirla desde la app o arrastrar carpetas aquí.</p>
+        <button class="btn primary big" id="btn-add-folder-empty"><svg class="i"><use href="#i-plus"/></svg>Agregar carpeta de anime</button>
+      </div>
+    </div>
+
+    <div id="home-content">
+      <div class="hero" id="hero"></div>
+
+      <div class="section" id="reco-section" hidden>
+        <div class="section-head">
+          <h2><span class="dot" style="background:#fbbf24;box-shadow:0 0 12px #fbbf24"></span>Recomendación del día</h2>
+          <div class="reco-actions">
+            <button class="chip" data-hide-reco title="Ocultar esta sección (se reactiva en Ajustes → Apariencia)">Ocultar</button>
+            <button class="chip" id="btn-reco-shuffle" title="Ver otra selección"><svg class="i" style="width:14px;height:14px"><use href="#i-refresh"/></svg> Otra selección</button>
+            <button class="btn primary" id="btn-random"><svg class="i"><use href="#i-dice"/></svg>Elegir uno al azar</button>
+          </div>
+        </div>
+        <div class="reco-row" id="reco-row"></div>
+      </div>
+
+      <div class="section" id="continue-section">
+        <div class="section-head"><h2><span class="dot"></span>Continuar viendo</h2></div>
+        <div class="row-scroll" id="continue-row"></div>
+      </div>
+
+      <div class="section" id="new-section" hidden>
+        <div class="section-head"><h2><span class="dot" style="background:#34d399;box-shadow:0 0 12px #34d399"></span>Capítulos nuevos</h2></div>
+        <div class="row-scroll" id="new-row"></div>
+      </div>
+
+      <div class="section" id="recent-section">
+        <div class="section-head">
+          <h2><span class="dot purple"></span>Agregados recientemente</h2>
+          <button class="chip" data-go="library">Ver todo</button>
+        </div>
+        <div class="row-scroll posters" id="recent-row"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CARTELERA -->
+  <section class="view" id="view-library">
+    <div class="library-head glass">
+      <div class="letters" id="letters"></div>
+      <div class="lib-tools">
+        <div class="seg" id="view-seg" title="Tipo de vista">
+          <button data-lview="list" title="Lista con detalles"><svg class="i"><use href="#i-rows"/></svg></button>
+          <button data-lview="grid" title="Cuadrícula de portadas"><svg class="i"><use href="#i-grid"/></svg></button>
+        </div>
+        <div class="seg" id="sort-seg">
+          <span class="seg-label">Ordenar:</span>
+          <button data-sort="az">A-Z</button>
+          <button data-sort="recent">Recientes</button>
+          <button data-sort="watched">Última vista</button>
+          <button data-sort="score">Puntuación</button>
+          <button data-sort="year">Año</button>
+          <button data-sort="count">Capítulos</button>
+        </div>
+        <button class="btn glass" id="btn-select" title="Seleccionar varias series para asignarles una categoría"><svg class="i"><use href="#i-check"/></svg>Seleccionar</button>
+        <div class="seg" id="size-seg" title="Tamaño de tarjetas">
+          <button data-size="s">S</button><button data-size="m">M</button><button data-size="l">L</button>
+        </div>
+      </div>
+    </div>
+    <div class="genre-bar" id="genre-bar" hidden></div>
+    <div class="lib-count" id="lib-count"></div>
+    <div class="poster-grid" id="poster-grid"></div>
+  </section>
+
+  <!-- SERIE -->
+  <section class="view" id="view-series">
+    <div class="series-hero" id="series-hero"></div>
+    <div class="series-body">
+      <div class="series-tabs" id="series-groups"></div>
+      <div class="ep-grid" id="series-episodes"></div>
+    </div>
+  </section>
+
+  <!-- REPRODUCTOR -->
+  <section class="view" id="view-player">
+    <div class="player-layout" id="player-layout">
+      <div class="player-main">
+        <div class="stage-slot" id="stage-slot"></div>
+        <div class="under-bar">
+          <button class="bar-btn glass" id="pl-prev"><svg class="i"><use href="#i-chev-l"/></svg>Anterior</button>
+          <button class="bar-btn glass" id="pl-toggle-list"><svg class="i"><use href="#i-list"/></svg><span>Lista de capítulos</span></button>
+          <button class="bar-btn glass" id="pl-next">Siguiente<svg class="i"><use href="#i-chev-r"/></svg></button>
+        </div>
+        <div class="now-info glass">
+          <div class="now-cover" id="now-cover"></div>
+          <div class="now-text">
+            <div class="now-series" id="now-series"></div>
+            <h1 class="now-title" id="now-title"></h1>
+            <div class="now-meta" id="now-meta"></div>
+            <div class="now-extra" id="now-extra"></div>
+          </div>
+          <div class="now-actions">
+            <button class="btn glass" id="now-open-series"><svg class="i"><use href="#i-grid"/></svg>Ver serie</button>
+            <button class="btn glass" id="now-folder"><svg class="i"><use href="#i-folder"/></svg>Carpeta</button>
+            <button class="btn glass" id="now-potplayer"><svg class="i"><use href="#i-external"/></svg>Abrir con…</button>
+          </div>
+        </div>
+        <div class="shortcuts glass">
+          <div class="sc-title"><svg class="i"><use href="#i-keyboard"/></svg>Atajos</div>
+          <div class="sc-list">
+            <span><kbd>Espacio</kbd> Pausa</span><span><kbd>←</kbd><kbd>→</kbd> ±5 s</span><span><kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> ±30 s</span>
+            <span><kbd>↑</kbd><kbd>↓</kbd> Volumen</span><span><kbd>F</kbd> Pantalla completa</span><span><kbd>M</kbd> Silencio</span>
+            <span><kbd>N</kbd>/<kbd>P</kbd> Sig./Ant.</span><span><kbd>C</kbd> Color</span><span><kbd>L</kbd> Lista</span>
+            <span><kbd>[</kbd><kbd>]</kbd> Velocidad</span><span><kbd>S</kbd> Subtítulos</span><span><kbd>I</kbd> Mini</span><span><kbd>T</kbd> Modo cine</span><span><kbd>G</kbd> Luz ambiental</span><span><kbd>Ctrl</kbd>+<kbd>S</kbd> Captura</span>
+            <span><kbd>,</kbd><kbd>.</kbd> Cuadro a cuadro</span><span><kbd>0</kbd>-<kbd>9</kbd> Saltar %</span>
+          </div>
+        </div>
+      </div>
+      <aside class="ep-panel glass" id="ep-panel">
+        <div class="ep-panel-head">
+          <div>
+            <div class="ep-panel-title" id="ep-panel-title">Capítulos</div>
+            <div class="ep-panel-sub" id="ep-panel-sub"></div>
+          </div>
+          <button class="icon-btn" id="ep-panel-close" title="Ocultar lista (L)"><svg class="i"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="ep-panel-tools">
+          <label class="mini-search"><svg class="i"><use href="#i-search"/></svg><input id="ep-filter" placeholder="Filtrar capítulos..." spellcheck="false"></label>
+          <div class="ep-groups" id="ep-panel-groups"></div>
+        </div>
+        <div class="ep-list" id="ep-list"></div>
+      </aside>
+    </div>
+  </section>
+</main>
+
+<!-- Luz ambiental: detrás de los paneles, sigue la posición del video -->
+<div id="glow-wrap"><div class="shell-glow" id="shell-glow"><canvas id="glow-canvas" width="32" height="18"></canvas></div></div>
+
+<!-- Reproductor flotante (se acopla a la vista o queda en mini) -->
+<div id="shell" class="hidden">
+  <div class="stage" id="stage">
+    <video id="video" crossorigin="anonymous" preload="auto" playsinline></video>
+    <canvas id="gl-canvas"></canvas>
+    <div class="subs" id="subs"></div>
+    <div class="osd" id="osd"></div>
+    <div class="center-icon" id="center-icon"></div>
+    <div class="spinner" id="spinner"></div>
+    <div class="error-box glass" id="error-box" hidden>
+      <h3>No se puede reproducir este archivo</h3>
+      <p id="error-text"></p>
+      <div class="row">
+        <button class="btn primary" id="err-potplayer"><svg class="i"><use href="#i-external"/></svg>Abrir con otro reproductor</button>
+        <button class="btn glass" id="err-next">Siguiente capítulo</button>
+      </div>
+    </div>
+    <div class="resume-card glass" id="resume-card" hidden>
+      <div class="resume-ico"><svg class="i"><use href="#i-refresh"/></svg></div>
+      <div class="resume-txt"><b>¿Continuar donde lo dejaste?</b><span id="resume-info"></span></div>
+      <div class="resume-actions">
+        <button class="btn glass" id="resume-restart" title="Empezar el capítulo desde 0:00 (tecla Inicio)"><svg class="i"><use href="#i-prev"/></svg>Desde el inicio</button>
+        <button class="btn primary" id="resume-go" title="Continuar (Enter)"><svg class="i"><use href="#i-play"/></svg>Continuar <em id="resume-count">5</em></button>
+      </div>
+      <div class="resume-bar"><i id="resume-bar"></i></div>
+    </div>
+    <div class="next-card glass" id="next-card" hidden>
+      <div class="next-thumb" id="next-thumb"></div>
+      <div class="next-txt"><small>Siguiente en <b id="next-count">8</b> s</small><div id="next-name"></div></div>
+      <div class="next-actions"><button class="btn primary" id="next-go">Reproducir</button><button class="btn glass" id="next-cancel">Cancelar</button></div>
+    </div>
+
+    <!-- barra superior dentro del video -->
+    <div class="ctl-top">
+      <div class="ctl-title"><span id="ctl-series"></span><b id="ctl-ep"></b></div>
+      <div class="ctl-top-actions">
+        <button class="ctl-btn" id="btn-pin" title="Siempre visible"><svg class="i"><use href="#i-pin"/></svg></button>
+      </div>
+    </div>
+
+    <!-- controles -->
+    <div class="controls" id="controls">
+      <div class="progress" id="progress">
+        <div class="prog-track">
+          <div class="prog-buf" id="prog-buf"></div>
+          <div class="prog-fill" id="prog-fill"></div>
+          <div class="prog-hover" id="prog-hover"></div>
+          <div class="prog-knob" id="prog-knob"></div>
+        </div>
+        <div class="prog-tip glass" id="prog-tip"><canvas id="tip-canvas" width="192" height="108"></canvas><span id="tip-time">0:00</span></div>
+      </div>
+      <div class="ctl-row">
+        <div class="ctl-left">
+          <button class="ctl-btn" id="c-prev" title="Anterior (P)"><svg class="i"><use href="#i-prev"/></svg></button>
+          <button class="ctl-btn big" id="c-play" title="Reproducir / Pausa (Espacio)"><svg class="i"><use href="#i-play"/></svg></button>
+          <button class="ctl-btn" id="c-next" title="Siguiente (N)"><svg class="i"><use href="#i-next"/></svg></button>
+          <button class="ctl-btn" id="c-back" title="-10 s"><svg class="i"><use href="#i-back10"/></svg></button>
+          <button class="ctl-btn" id="c-fwd" title="+10 s"><svg class="i"><use href="#i-fwd10"/></svg></button>
+          <div class="vol">
+            <button class="ctl-btn" id="c-mute" title="Silencio (M)"><svg class="i"><use href="#i-vol"/></svg></button>
+            <input type="range" id="c-vol" min="0" max="1" step="0.01" value="0.9">
+            <span class="vol-num" id="vol-num">90</span>
+          </div>
+          <div class="time"><span id="t-cur">0:00</span><i>/</i><span id="t-dur">0:00</span></div>
+          <span class="mode-badge" id="mode-badge" hidden></span>
+        </div>
+        <div class="ctl-right">
+          <div class="glowctl" title="Luz ambiental alrededor del video (G)">
+            <input type="range" id="c-glow-r" min="0" max="1" step="0.01" value="0.5">
+            <span class="vol-num" id="glow-num">50</span>
+            <button class="ctl-btn" id="c-glow" title="Luz ambiental (G)"><svg class="i"><use href="#i-glow"/></svg></button>
+          </div>
+          <button class="ctl-btn pill" id="c-speed" title="Velocidad ([ ])"><svg class="i"><use href="#i-speed"/></svg><span id="speed-label">1x</span></button>
+          <button class="ctl-btn" id="c-audio" title="Pista de audio" hidden><svg class="i"><use href="#i-audio"/></svg></button>
+          <button class="ctl-btn" id="c-sub" title="Subtítulos (S)"><svg class="i"><use href="#i-sub"/></svg></button>
+          <button class="ctl-btn" id="c-color" title="Color y efectos (C)"><svg class="i"><use href="#i-color"/></svg></button>
+          <button class="ctl-btn" id="c-shot" title="Captura (Ctrl+S)"><svg class="i"><use href="#i-camera"/></svg></button>
+          <button class="ctl-btn" id="c-list" title="Lista de capítulos (L)"><svg class="i"><use href="#i-list"/></svg></button>
+          <button class="ctl-btn" id="c-theater" title="Modo cine (T)"><svg class="i"><use href="#i-theater"/></svg></button>
+          <button class="ctl-btn" id="c-mini" title="Mini reproductor (I)"><svg class="i"><use href="#i-mini"/></svg></button>
+          <button class="ctl-btn" id="c-full" title="Pantalla completa (F)"><svg class="i"><use href="#i-full"/></svg></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- menús emergentes -->
+    <div class="popup glass" id="pop-speed" hidden></div>
+    <div class="popup glass" id="pop-audio" hidden></div>
+    <div class="popup glass" id="pop-sub" hidden></div>
+
+    <!-- panel de color -->
+    <div class="color-panel glass" id="color-panel" hidden>
+      <div class="cp-head">
+        <div><b>Color y efectos</b><small id="cp-scope">Global</small></div>
+        <button class="icon-btn" id="cp-close"><svg class="i"><use href="#i-close"/></svg></button>
+      </div>
+      <div class="cp-presets" id="cp-presets"></div>
+      <div class="cp-sliders" id="cp-sliders"></div>
+      <div class="cp-foot">
+        <label class="switch"><input type="checkbox" id="cp-compare"><span></span>Comparar antes/después</label>
+        <label class="switch"><input type="checkbox" id="cp-series"><span></span>Guardar solo para esta serie</label>
+        <div class="cp-btns">
+          <button class="btn glass" id="cp-reset">Restablecer</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- mini -->
+    <div class="mini-ctl">
+      <button class="ctl-btn" id="m-expand" title="Volver al reproductor"><svg class="i"><use href="#i-expand"/></svg></button>
+      <button class="ctl-btn big" id="m-play"><svg class="i"><use href="#i-play"/></svg></button>
+      <button class="ctl-btn" id="m-next"><svg class="i"><use href="#i-next"/></svg></button>
+      <button class="ctl-btn" id="m-close" title="Cerrar"><svg class="i"><use href="#i-close"/></svg></button>
+      <div class="mini-prog"><div id="mini-fill"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Modales -->
+<div class="modal" id="modal" hidden>
+  <div class="modal-card glass" id="modal-card"></div>
+</div>
+<div class="drop-overlay" id="drop-overlay" hidden><div class="glass"><svg class="i"><use href="#i-folder"/></svg>Suelta carpetas para agregarlas a la cartelera</div></div>
+<div class="toasts" id="toasts"></div>
+<canvas id="thumb-canvas" width="320" height="180" hidden></canvas>
+<video id="thumb-video" crossorigin="anonymous" muted preload="metadata" hidden></video>
+
+<script src="js/util.js"></script>
+<script src="js/subs.js"></script>
+<script src="js/gl.js"></script>
+<script src="js/player.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

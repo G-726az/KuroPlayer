@@ -1,0 +1,75 @@
+{
+  "name": "kuro-player",
+  "productName": "Kuro Player",
+  "version": "1.7.1",
+  "description": "Kuro Player: videoteca de anime local con cartelera, reproductor moderno estilo glass y soporte para todos los formatos",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win dir",
+    "build:setup": "electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "com.local.kuroplayer",
+    "productName": "Kuro Player",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json",
+      "!node_modules/ffprobe-static/bin/darwin/**",
+      "!node_modules/ffprobe-static/bin/linux/**",
+      "!node_modules/ffprobe-static/bin/win32/ia32/**"
+    ],
+    "win": {
+      "target": [
+        "dir",
+        "nsis"
+      ],
+      "icon": "build/icon.png",
+      "signAndEditExecutable": true,
+      "executableName": "KuroPlayer"
+    },
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**",
+      "node_modules/ffprobe-static/bin/win32/x64/**"
+    ],
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Kuro Player",
+      "uninstallDisplayName": "Kuro Player",
+      "artifactName": "KuroPlayer-Setup-${version}.${ext}",
+      "installerLanguages": [
+        "es_ES"
+      ],
+      "language": "3082",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
+    },
+    "copyright": "© 2026 Kuro Player"
+  },
+  "devDependencies": {
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0"
+  },
+  "author": "G-726az",
+  "license": "MIT",
+  "homepage": "https://github.com/G-726az/KuroPlayer",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/G-726az/KuroPlayer.git"
+  }
+}

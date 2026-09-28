@@ -1,0 +1,11 @@
+# dependencias y compilados (el instalador se sube a GitHub Releases, no al repositorio)
+node_modules/
+dist/
+
+# sistema / editores
+Thumbs.db
+desktop.ini
+.DS_Store
+*.log
+.vscode/
+.idea/
