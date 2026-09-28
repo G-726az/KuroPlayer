@@ -21,7 +21,6 @@
 
 **Kuro Player** convierte tus carpetas de anime en una cartelera como la de un servicio de streaming, pero **100 % local**: sin cuentas, sin anuncios y sin subir nada a internet. Cada subcarpeta es una serie y sus videos son los capítulos. Lo abres, eliges y sigues viendo justo donde lo dejaste.
 
-Nació como reemplazo de PotPlayer para ver anime: mantiene lo mejor (ajuste de saturación y color, todos los formatos, atajos de teclado) con una interfaz moderna.
 
 ## 📥 Descargar
 
