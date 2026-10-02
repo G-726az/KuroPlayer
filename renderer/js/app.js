@@ -1,7 +1,7 @@
 /* Aplicación: biblioteca, vistas (inicio, cartelera, serie, reproductor), miniaturas y ajustes. */
 const App = (() => {
   const A = {
-    series: [], byId: new Map(), progress: {}, settings: {}, roots: [], potplayer: '',
+    series: [], allSeries: [], groups: [], group: null, profiles: [], profile: null, byId: new Map(), progress: {}, settings: {}, roots: [], potplayer: '',
     view: 'home', lastBrowseView: 'home', currentSeries: null, letter: 'all', groupFilter: null, panelGroup: null,
     pendingProgress: {}, scanning: false, rootsInfo: [], genre: null, genreExpand: false, selecting: false, selected: new Set(),
   };
@@ -48,7 +48,7 @@ const App = (() => {
 
   function applyDisplayTitles() {
     const src = A.settings.titleSource || 'romaji';
-    for (const s of A.series) {
+    for (const s of A.allSeries) {
       s.customTitle = s.title !== s.folderName && s.title !== s.displayFolder;
       if (!s.customTitle && s.web && src !== 'folder') {
         s.title = src === 'english' ? (s.web.titleEn || s.web.title) : src === 'japanese' ? (s.web.titleJp || s.web.title) : (s.web.title || s.folderName);
@@ -58,6 +58,7 @@ const App = (() => {
   function synopsisOf(s) {
     if (s.synopsis) return s.synopsis;
     if (!s.web) return '';
+    if (I18N.lang === 'en') return s.web.synopsis || s.web.synopsisEs || '';
     return (A.settings.translateSynopsis !== false && s.web.synopsisEs) || s.web.synopsis || '';
   }
   function altTitles(s) {
@@ -69,7 +70,8 @@ const App = (() => {
   }
   function genresOf(s) {
     const out = [...(s.customGenres || [])];
-    for (const g of s.web ? (s.web.genresEs || s.web.genres || []) : []) if (!out.includes(g)) out.push(g);
+    const web = s.web ? (I18N.lang === 'en' ? (s.web.genres || s.web.genresEs) : (s.web.genresEs || s.web.genres)) || [] : [];
+    for (const g of web) if (!out.includes(g)) out.push(g);
     return out;
   }
   function allCustomCategories() {
@@ -93,7 +95,7 @@ const App = (() => {
   const NEW_MS = 7 * 86400000;
   function markNew() {
     const now = Date.now();
-    for (const s of A.series) {
+    for (const s of A.allSeries) {
       let n = 0;
       for (const e of s.episodes) {
         const p = A.progress[e.path];
@@ -108,10 +110,10 @@ const App = (() => {
     const inRoot = (x) => !root || (x.root || '').toLowerCase() === root.toLowerCase();
     const ns = diff.newSeries.filter(inRoot), ne = diff.newEpisodes.filter(inRoot), rs = diff.removedSeries.filter(inRoot);
     const parts = [];
-    if (ns.length) parts.push(ns.length === 1 ? `serie nueva: «${ns[0].title}» (${ns[0].count} cap.)` : `${ns.length} series nuevas`);
+    if (ns.length) parts.push(ns.length === 1 ? `nuevo: «${ns[0].title}»${ns[0].count > 1 ? ` (${ns[0].count} cap.)` : ''}` : `${ns.length} títulos nuevos`);
     const epCount = ne.reduce((a, x) => a + x.count, 0);
     if (epCount) parts.push(ne.length === 1 ? `${epCount} capítulo${epCount > 1 ? 's' : ''} nuevo${epCount > 1 ? 's' : ''} en «${ne[0].title}»` : `${epCount} capítulos nuevos en ${ne.length} series`);
-    if (rs.length) parts.push(`${rs.length} serie${rs.length > 1 ? 's' : ''} ya no está${rs.length > 1 ? 'n' : ''}`);
+    if (rs.length) parts.push(`${rs.length} título${rs.length > 1 ? 's' : ''} ya no está${rs.length > 1 ? 'n' : ''}`);
     if (!root && diff.removedEpisodes) parts.push(`${diff.removedEpisodes} capítulo${diff.removedEpisodes > 1 ? 's' : ''} quitado${diff.removedEpisodes > 1 ? 's' : ''}`);
     return { text: parts.join(' · '), changed: parts.length > 0 };
   }
@@ -119,12 +121,15 @@ const App = (() => {
   async function scan(silent, opts = {}) {
     if (A.scanning) { A.rescanPending = true; return null; }
     A.scanning = true;
+    Busy.set('scan', 'Revisando la biblioteca');
     $('#btn-rescan').classList.add('spin');
     try {
       const { series: list, diff } = await window.cinema.scan();
       A.lastDiff = diff;
-      A.series = list;
+      A.allSeries = list;
       A.byId = new Map(list.map((s) => [s.id, s]));
+      applyGroupFilter();
+      renderRail();
       applyDisplayTitles();
       markNew();
       // mantener referencias del reproductor actualizadas
@@ -139,12 +144,13 @@ const App = (() => {
       queueMissingCoverThumbs();
       const sum = diffSummary(diff, opts.root);
       if (sum.changed && !opts.quiet) toast('Novedades: ' + sum.text, 6000);
-      else if (!silent) toast(opts.root ? 'Sin cambios en esa carpeta' : `Sin cambios · ${list.length} series · ${list.reduce((a, s) => a + s.episodes.length, 0)} capítulos`);
+      else if (!silent) toast(opts.root ? 'Sin cambios en esa carpeta' : `Sin cambios · ${A.series.length} ${groupNoun(A.series.length)} en «${esc(curGroup().name)}»`);
       return diff;
     } catch (e) {
       console.error(e); toast('Error al escanear la biblioteca');
     } finally {
       A.scanning = false;
+    Busy.clear('scan');
       $('#btn-rescan').classList.remove('spin');
       if (A.rescanPending) { A.rescanPending = false; setTimeout(() => scan(true), 500); }
     }
@@ -174,6 +180,7 @@ const App = (() => {
   function setAmbient(s) {
     const img = $('#amb-img');
     const url = s && (s.backdrop || s.cover || (s.episodes[0] && s.episodes[0].thumb));
+    coverAccent(s);
     img.style.backgroundImage = url ? cssUrl(url) : 'none';
     img.classList.toggle('on', !!url);
   }
@@ -192,9 +199,10 @@ const App = (() => {
     return `<div class="poster ${A.selected.has(s.id) ? 'selected' : ''}" data-series="${s.id}" title="${esc(s.title)}"><span class="sel-box"><svg class="i"><use href="#i-check"/></svg></span>
       <div class="art">${posterArt(s)}
         ${isNew ? '<span class="new">NUEVO</span>' : s.newCount ? `<span class="new">+${s.newCount} NUEVO${s.newCount > 1 ? 'S' : ''}</span>` : ''}
-        <span class="count">${st.total} EP</span>${seen}
+        <span class="count">${s.kind === 'movie' && st.total === 1 ? 'PELÍCULA' : st.total + ' EP'}</span>${seen}
         ${s.web && s.web.score ? `<span class="score"><svg class="i"><use href="#i-star"/></svg>${s.web.score}</span>` : ''}
         <div class="play-o"><span><svg class="i"><use href="#i-play"/></svg></span></div>
+        ${favBtn(s)}
         ${pct ? `<div class="p-bar"><i style="width:${pct}%"></i></div>` : ''}
       </div>
       <div class="p-title">${esc(s.title)}</div>
@@ -220,6 +228,7 @@ const App = (() => {
       <div class="lcard-left">
         <div class="lcard-art">${art ? `<img src="${esc(art)}" loading="lazy" draggable="false" alt="">` : `<div class="no-art" style="--g:${hashGradient(s.title)}">${esc(s.title)}</div>`}
           <div class="play-o"><span><svg class="i"><use href="#i-play"/></svg></span></div>
+          ${favBtn(s)}
           ${pct ? `<div class="p-bar"><i style="width:${pct}%"></i></div>` : ''}
         </div>
         <div class="lcard-stats">
@@ -243,6 +252,127 @@ const App = (() => {
     const w = !!(p && p.w);
     return `<button class="eye-btn ${w ? 'on' : ''}" data-eye="${e.id}" data-sid="${s.id}" title="${w ? 'Visto · clic para marcar como no visto' : 'Marcar como visto'}"><svg class="i"><use href="#${w ? 'i-eye' : 'i-eye-off'}"/></svg></button>`;
   }
+  // ------------------------------------------------------------ FAVORITOS (series/películas y videos sueltos)
+  function favBtn(s) {
+    return `<button class="fav-btn ${s.fav ? 'on' : ''}" data-fav-s="${s.id}" title="${s.fav ? 'Quitar de favoritos' : 'Agregar a favoritos'}"><svg class="i"><use href="#${s.fav ? 'i-heart-f' : 'i-heart'}"/></svg></button>`;
+  }
+  function favEpBtn(e, s) {
+    return `<button class="fav-btn ep ${e.fav ? 'on' : ''}" data-fav-e="${e.id}" data-sid="${s.id}" title="${e.fav ? 'Quitar de favoritos' : 'Agregar a favoritos'}"><svg class="i"><use href="#${e.fav ? 'i-heart-f' : 'i-heart'}"/></svg></button>`;
+  }
+  async function toggleFavSeries(s) {
+    s.fav = !s.fav; s.favAt = s.fav ? Date.now() : 0;
+    await window.cinema.setMeta(s.id, { fav: s.fav, favAt: s.favAt });
+    toast(s.fav ? `«${s.title}» agregado a favoritos` : `«${s.title}» quitado de favoritos`);
+    renderAll();
+  }
+  async function toggleFavEp(s, e) {
+    e.fav = !e.fav;
+    await window.cinema.favEp(e.path, e.fav);
+    toast(e.fav ? 'Video agregado a favoritos' : 'Video quitado de favoritos');
+    renderAll();
+  }
+  const isFavItem = (s) => s.fav || s.episodes.some((e) => e.fav);
+  // los videos favoritos forman una lista propia, sin importar en qué carpeta estén
+  function favPlaylist() {
+    const owner = new Map();
+    const episodes = [];
+    for (const ser of A.series) for (const ep of ser.episodes) if (ep.fav) { episodes.push(ep); owner.set(ep.id, ser); }
+    return { id: '__fav__', title: 'Favoritos', episodes, ownerOf: (ep) => owner.get(ep.id) };
+  }
+
+  // ------------------------------------------------------------ DURACIÓN (grupos «Otros»)
+  const DUR_BUCKETS = [
+    { k: 'lt1', label: 'Menos de 1 minuto', test: (d) => d < 60 },
+    { k: '1to5', label: 'De 1 a 5 minutos', test: (d) => d >= 60 && d < 300 },
+    { k: '5to10', label: 'De 5 a 10 minutos', test: (d) => d >= 300 && d < 600 },
+    { k: '10to30', label: 'De 10 a 30 minutos', test: (d) => d >= 600 && d < 1800 },
+    { k: 'gt30', label: 'Más de 30 minutos', test: (d) => d >= 1800 },
+  ];
+  function epDur(ep) {
+    if (ep.dur) return ep.dur;
+    const p = A.progress[ep.path];
+    return p && p.d ? p.d : null;
+  }
+  // las duraciones se leen con FFmpeg en segundo plano, por tandas, y quedan guardadas
+  function durTargets() {
+    const out = [];
+    if (A.view === 'library' && curGroup().type === 'other') for (const s of A.series) out.push(...s.episodes);
+    if (A.view === 'series' && A.currentSeries) out.push(...A.currentSeries.episodes);
+    return out;
+  }
+  async function loadDurations() {
+    if (A.durLoading) return;
+    A.durLoading = true;
+    Busy.set('dur', 'Midiendo la duración de los videos');
+    try {
+      for (;;) {
+        const pending = durTargets().filter((e) => epDur(e) == null && !e.durTried);
+        if (!pending.length) break;
+        const batch = pending.slice(0, 30);
+        batch.forEach((e) => { e.durTried = true; });
+        const res = await window.cinema.durations(batch.map((e) => e.path));
+        for (const e of batch) if (res[e.path]) e.dur = res[e.path];
+        if (A.view === 'library') renderLibrary();
+        if (A.view === 'series') renderSeries();
+      }
+    } catch (err) { console.warn('duraciones', err); }
+    A.durLoading = false;
+    Busy.clear('dur');
+    if (A.view === 'library') renderLibrary();
+    if (A.view === 'series') renderSeries();
+  }
+  // filtro por duración dentro de una carpeta (grupos «Otros»)
+  function renderSeriesDur(s) {
+    const box = $('#series-dur');
+    if (A.serDurFor !== s.id) { A.serDurFor = s.id; A.serDur = A.durFilter || null; A.serFav = false; }
+    const favN = s.episodes.filter((e) => e.fav).length;
+    if (!favN) A.serFav = false;
+    const favChip = favN ? `<button class="chip fav-chip ${A.serFav ? 'active' : ''}" data-sfav><svg class="i"><use href="#${A.serFav ? 'i-heart-f' : 'i-heart'}"/></svg>Favoritos <small>${favN}</small></button>` : '';
+    if (groupOf(s).type !== 'other' || s.episodes.length < 2) {
+      A.serDur = null;
+      box.hidden = !favChip;
+      box.innerHTML = favChip;
+      return;
+    }
+    const durs = s.episodes.map(epDur).filter((d) => d != null);
+    const pending = s.episodes.filter((e) => epDur(e) == null && !e.durTried).length;
+    box.hidden = false;
+    box.innerHTML = favChip + `<span class="seg-label">Duración:</span><button class="chip ${!A.serDur ? 'active' : ''}" data-sdur="">Todas <small>${s.episodes.length}</small></button>`
+      + DUR_BUCKETS.map((b) => `<button class="chip ${A.serDur === b.k ? 'active' : ''}" data-sdur="${b.k}">${b.label} <small>${durs.filter(b.test).length}</small></button>`).join('')
+      + (pending ? `<span class="muted small dur-wait">Calculando duraciones… ${durs.length}/${s.episodes.length}</span>` : '');
+  }
+  function vidCardHtml(s, ep, pl) {
+    const d = epDur(ep);
+    return `<div class="continue-card vid-card" data-play-ep="${ep.id}" data-sid="${s.id}" ${pl ? `data-pl="${pl}"` : ''}>
+      <div class="thumb" data-thumb="${ep.id}" style="background-image:${cssUrl(ep.thumb || s.cover)}">
+        ${d ? `<span class="dur-badge">${fmtTime(d)}</span>` : ''}
+        <div class="play-o"><span><svg class="i"><use href="#i-play"/></svg></span></div>
+        ${eyeBtn(ep, s)}${favEpBtn(ep, s)}
+        ${progressBar(ep)}
+      </div>
+      <div class="cc-t">${esc(ep.title)}</div>
+      <div class="cc-s">${esc(s.title)}</div>
+    </div>`;
+  }
+  function renderLibFilters() {
+    const bar = $('#lib-filters');
+    const isOther = curGroup().type === 'other';
+    if (!isOther) A.durFilter = null;
+    const favN = A.series.filter(isFavItem).length;
+    if (!isOther && !favN && !A.favOnly) { bar.hidden = true; return; }
+    bar.hidden = false;
+    let html = `<button class="chip fav-chip ${A.favOnly ? 'active' : ''}" data-fav-only><svg class="i"><use href="#${A.favOnly ? 'i-heart-f' : 'i-heart'}"/></svg>Favoritos <small>${favN}</small></button>`;
+    if (isOther) {
+      const eps = A.series.flatMap((s) => s.episodes);
+      const durs = eps.map(epDur).filter((d) => d != null);
+      html += `<span class="seg-label">Duración:</span><button class="chip ${!A.durFilter ? 'active' : ''}" data-dur="">Todas</button>`
+        + DUR_BUCKETS.map((b) => `<button class="chip ${A.durFilter === b.k ? 'active' : ''}" data-dur="${b.k}">${b.label} <small>${durs.filter(b.test).length}</small></button>`).join('');
+      const pending = eps.filter((e) => epDur(e) == null && !e.durTried).length;
+      if (pending) { html += `<span class="muted small dur-wait">Calculando duraciones… ${durs.length}/${eps.length}</span>`; loadDurations(); }
+    }
+    bar.innerHTML = html;
+  }
+
   // aleatorio con semilla (la recomendación del día no cambia al recargar)
   function seededRandom(seed) {
     let a = seed >>> 0;
@@ -305,6 +435,7 @@ const App = (() => {
   function renderHome() {
     const empty = !A.series.length;
     $('#empty-state').hidden = !empty;
+    if (empty) updateGroupChrome();
     $('#home-content').hidden = empty;
     if (empty) return;
     const s = heroSeries();
@@ -319,7 +450,7 @@ const App = (() => {
         <div class="hero-txt">
           <div class="hero-tag"><span class="dot"></span>${st.lastTs ? 'Continuar viendo' : 'Recién agregado'}</div>
           <h1>${esc(s.title)}</h1>
-          <div class="hero-meta"><span>${st.total} capítulos</span>${st.watched ? `<span>${st.watched} vistos</span>` : ''}${s.groups.filter(Boolean).length ? `<span>${s.groups.filter(Boolean).length} temporadas</span>` : ''}<span>${fmtSize(s.size)}</span></div>
+          <div class="hero-meta"><span>${st.total} capítulos</span>${st.watched ? `<span>${st.watched} ${st.watched === 1 ? 'visto' : 'vistos'}</span>` : ''}${s.groups.filter(Boolean).length ? `<span>${s.groups.filter(Boolean).length} temporadas</span>` : ''}<span>${fmtSize(s.size)}</span></div>
           ${p && !p.w && p.d ? `<div class="hero-prog"><i style="width:${(p.t / p.d) * 100}%"></i></div>` : ''}
           <div class="hero-actions">
             <button class="btn primary big" data-play-series="${s.id}"><svg class="i"><use href="#i-play"/></svg>${tgt.fresh && !st.lastTs ? 'Ver desde el inicio' : 'Continuar ' + esc(epLabel(tgt.ep))}</button>
@@ -332,8 +463,8 @@ const App = (() => {
     for (const ser of A.series) {
       const sst = seriesStats(ser);
       if (!sst.lastTs) continue;
-      if (sst.lastTs <= (A.settings.continueClearedAt || 0)) continue;
-      if (sst.lastTs <= ((A.settings.continueHidden || {})[ser.id] || 0)) continue;
+      if (sst.lastTs <= (A.settings[pk('continueClearedAt')] || 0)) continue;
+      if (sst.lastTs <= ((A.settings[pk('continueHidden')] || {})[ser.id] || 0)) continue;
       const t = resumeTarget(ser);
       if (t.fresh && sst.watched === sst.total) continue;
       items.push({ s: ser, ep: t.ep, ts: sst.lastTs });
@@ -356,6 +487,16 @@ const App = (() => {
       </div>`;
     }).join('');
     items.slice(0, 16).forEach(({ s: ser, ep }) => { if (!ep.thumb) Thumbs.request(ser, ep); });
+    // favoritos: series/películas marcadas y videos sueltos marcados
+    const favS = A.series.filter((x) => x.fav).sort((a, b) => (b.favAt || 0) - (a.favAt || 0));
+    const favE = [];
+    for (const ser of A.series) for (const ep of ser.episodes) if (ep.fav) favE.push({ s: ser, ep });
+    $('#fav-section').hidden = A.settings.homeFav === false || (!favS.length && !favE.length);
+    $('#fav-row').hidden = !favS.length;
+    $('#fav-row').innerHTML = favS.map(posterHtml).join('');
+    $('#fav-ep-row').hidden = !favE.length;
+    $('#fav-ep-row').innerHTML = favE.slice(0, 40).map(({ s: ser, ep }) => vidCardHtml(ser, ep, 'fav')).join('');
+    favE.slice(0, 40).forEach(({ s: ser, ep }) => { if (!ep.thumb) Thumbs.request(ser, ep); });
     const showReco = A.settings.dailyReco !== false && A.series.length > 0;
     $('#reco-section').hidden = !showReco;
     if (showReco) {
@@ -394,6 +535,369 @@ const App = (() => {
     $('#recent-section').hidden = A.settings.homeRecent === false;
   }
 
+  // ------------------------------------------------------------ PERFILES
+  // «Continuar viendo» se oculta/limpia por perfil (el perfil principal usa las claves de siempre)
+  function pk(k) { return A.profiles.length && A.profile !== A.profiles[0].id ? `${k}@${A.profile}` : k; }
+  function curProfile() { return A.profiles.find((p) => p.id === A.profile) || A.profiles[0] || { name: '?', color: '#a855f7' }; }
+  function renderAvatar() {
+    const p = curProfile(); const b = $('#btn-profile');
+    b.textContent = (p.name || '?').trim().charAt(0).toUpperCase();
+    b.style.setProperty('--pc', p.color);
+    b.title = `Perfil: ${p.name} (clic para cambiar)`;
+  }
+  async function switchProfile(id) {
+    if (id === A.profile) return;
+    if (Player.state.ep) { Player.saveProgress(true); Player.close(); }
+    await new Promise((r) => setTimeout(r, 50));
+    const res = await window.cinema.switchProfile(id);
+    if (!res) return;
+    A.profile = res.activeProfile; A.progress = res.progress || {};
+    recoCache = null;
+    markNew(); renderAvatar(); renderAll();
+    toast(`Perfil: ${esc(curProfile().name)}`);
+  }
+  function profileMenu(ev) {
+    const r = ev.currentTarget.getBoundingClientRect();
+    ctxMenu(r.right - 240, r.bottom + 8, [
+      ...A.profiles.map((p) => ({ icon: p.id === A.profile ? 'i-check' : 'i-eye-off', label: p.name + (p.id === A.profile ? '  (actual)' : ''), action: () => switchProfile(p.id) })),
+      '-',
+      { icon: 'i-edit', label: 'Administrar perfiles...', action: openProfiles },
+    ]);
+  }
+  function openProfiles() {
+    let list = A.profiles.map((p) => ({ ...p }));
+    const draw = () => {
+      openModal(`<h2>Perfiles</h2>
+        <p class="sub">Cada perfil tiene su propio progreso, capítulos vistos y «Continuar viendo». La biblioteca, los grupos y los ajustes son compartidos.</p>
+        <div class="prof-list">${list.map((p, i) => `<div class="prof-row ${p.id === A.profile ? 'cur' : ''}"><span class="avatar" style="--pc:${p.color}">${esc((p.name || '?').charAt(0).toUpperCase())}</span>
+          <input type="text" class="sel" data-pf-name="${i}" value="${esc(p.name)}" maxlength="24" spellcheck="false">
+          <div class="g-colors">${GROUP_COLORS.slice(0, 6).map((c) => `<button class="${p.color === c ? 'on' : ''}" data-pf-color="${i}" data-c="${c}" style="background:${c}"></button>`).join('')}</div>
+          ${list.length > 1 ? `<button class="icon-btn" data-pf-del="${i}" title="Eliminar perfil y su progreso"><svg class="i"><use href="#i-trash"/></svg></button>` : ''}</div>`).join('')}</div>
+        <div class="set-actions" style="margin-top:12px"><button class="btn glass" id="pf-add"><svg class="i"><use href="#i-plus"/></svg>Agregar perfil</button></div>
+        <div class="modal-actions"><button class="btn glass" data-close>Cancelar</button><button class="btn primary" id="pf-save">Guardar</button></div>`);
+      $$('[data-pf-name]').forEach((inp) => inp.oninput = () => { list[+inp.dataset.pfName].name = inp.value; });
+      $$('[data-pf-color]').forEach((b) => b.onclick = () => { list[+b.dataset.pfColor].color = b.dataset.c; draw(); });
+      $$('[data-pf-del]').forEach((b) => b.onclick = async () => {
+        const p = list[+b.dataset.pfDel];
+        if (!await confirmBox({ title: `Eliminar el perfil «${p.name}»`, danger: true, ok: 'Eliminar', html: '<p>Se borra su progreso y sus capítulos vistos. Los demás perfiles no cambian.</p>' })) return;
+        list.splice(+b.dataset.pfDel, 1); draw();
+      });
+      $('#pf-add').onclick = () => { if (list.length >= 12) return; list.push({ id: 'p' + randomGroupId().slice(1), name: `Perfil ${list.length + 1}`, color: GROUP_COLORS[list.length % 6] }); draw(); };
+      $('#pf-save').onclick = async () => {
+        const res = await window.cinema.saveProfiles(list);
+        A.profiles = res.profiles;
+        if (res.activeProfile !== A.profile) { A.profile = null; await switchProfile(res.activeProfile); }
+        renderAvatar(); closeModal(); toast('Perfiles guardados');
+      };
+    };
+    draw();
+  }
+
+  // ------------------------------------------------------------ ACTUALIZACIONES
+  async function checkUpdates(manual) {
+    let u;
+    try { u = await window.cinema.updateCheck(); } catch (e) { if (manual) toast('No se pudo revisar: ' + esc(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')), 4500); return; }
+    if (!u.available) { if (manual) toast(`Tienes la última versión (${esc(u.current)})`); return; }
+    if (!manual && A.settings.skipVersion === u.latest) return;
+    if (manual) return openUpdate(u);
+    let pill = $('#update-pill');
+    if (!pill) { pill = document.createElement('div'); pill.id = 'update-pill'; pill.className = 'update-pill glass'; document.body.appendChild(pill); }
+    pill.innerHTML = `<svg class="i"><use href="#i-star"/></svg><span>Nueva versión <b>${esc(u.latest)}</b> disponible</span><button class="btn primary" id="up-see">Ver novedades</button><button class="icon-btn" id="up-x" title="Ahora no"><svg class="i"><use href="#i-close"/></svg></button>`;
+    $('#up-see').onclick = () => { pill.remove(); openUpdate(u); };
+    $('#up-x').onclick = () => pill.remove();
+  }
+  function openUpdate(u) {
+    openModal(`<h2>Kuro Player ${esc(u.latest)}</h2>
+      <p class="sub">Tienes la ${esc(u.current)}. Novedades de esta versión:</p>
+      <div class="upd-notes">${esc(u.notes || 'Sin notas.')}</div>
+      <div class="upd-bar" id="up-bar" hidden><i></i></div>
+      <div class="modal-actions"><button class="btn glass" id="up-skip" style="margin-right:auto">Omitir esta versión</button><button class="btn glass" id="up-web">Ver en GitHub</button>
+        ${u.asset ? `<button class="btn primary" id="up-go"><svg class="i"><use href="#i-refresh"/></svg>Descargar e instalar (${fmtSize(u.asset.size)})</button>` : ''}</div>`);
+    $('#up-skip').onclick = () => { saveSettings({ skipVersion: u.latest }); closeModal(); };
+    $('#up-web').onclick = () => window.cinema.openUrl(u.url);
+    if ($('#up-go')) $('#up-go').onclick = async () => {
+      const b = $('#up-go'); b.disabled = true; b.textContent = 'Descargando...';
+      $('#up-bar').hidden = false;
+      try {
+        await window.cinema.updateDownload(u.asset.url, u.asset.name);
+        b.textContent = 'Instalando...';
+        if (Player.state.ep) Player.saveProgress(true);
+        await window.cinema.updateInstall();
+      } catch (e) { b.disabled = false; b.textContent = 'Reintentar'; toast('Error al descargar: ' + esc(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')), 5000); }
+    };
+  }
+  window.cinema.onUpdateProgress((d) => { const i = $('#up-bar i'); if (i && d.total) i.style.width = (d.got / d.total) * 100 + '%'; });
+
+  // ------------------------------------------------------------ TEMA Y COLORES
+  const ACCENTS = {
+    violeta: { name: 'Violeta', c: ['168, 85, 247', '34, 211, 238', '99, 102, 241'] },
+    rosa: { name: 'Rosa', c: ['236, 72, 153', '167, 139, 250', '244, 63, 94'] },
+    azul: { name: 'Azul', c: ['59, 130, 246', '34, 211, 238', '99, 102, 241'] },
+    cian: { name: 'Cian', c: ['6, 182, 212', '52, 211, 153', '59, 130, 246'] },
+    verde: { name: 'Verde', c: ['16, 185, 129', '163, 230, 53', '20, 184, 166'] },
+    naranja: { name: 'Naranja', c: ['249, 115, 22', '250, 204, 21', '239, 68, 68'] },
+    rojo: { name: 'Rojo', c: ['244, 63, 94', '251, 146, 60', '236, 72, 153'] },
+    oro: { name: 'Dorado', c: ['234, 179, 8', '251, 146, 60', '217, 119, 6'] },
+  };
+  function hexRgb(h) { const n = parseInt(String(h).slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+  function rgbHsl([r, g, b]) {
+    r /= 255; g /= 255; b /= 255;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2;
+    let h = 0, s = 0;
+    if (mx !== mn) { const d = mx - mn; s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h *= 60; }
+    return [h, s, l];
+  }
+  function hslRgb(h, s, l) {
+    h = ((h % 360) + 360) % 360 / 360;
+    const f = (p, q, t) => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+    return [f(p, q, h + 1 / 3), f(p, q, h), f(p, q, h - 1 / 3)].map((x) => Math.round(x * 255));
+  }
+  // a partir de un color se arman los tres tonos del degradado
+  function paletteFrom(rgb) {
+    const [h, s, l] = rgbHsl(rgb);
+    const S = Math.max(0.55, s), L = Math.min(0.62, Math.max(0.5, l));
+    return [hslRgb(h, S, L), hslRgb(h + 70, S, 0.55), hslRgb(h - 35, S, 0.58)].map((c) => c.join(', '));
+  }
+  let coverAccentUrl = '';
+  function setAccentVars(c) {
+    const st = document.documentElement.style;
+    st.setProperty('--a1', c[0]); st.setProperty('--a2', c[1]); st.setProperty('--a4', c[2]); st.setProperty('--a3', c[0]);
+  }
+  function baseAccent() {
+    const acc = A.settings.accent || 'violeta';
+    return /^#[0-9a-f]{6}$/i.test(acc) ? paletteFrom(hexRgb(acc)) : (ACCENTS[acc] || ACCENTS.violeta).c;
+  }
+  // color de acento a partir de la portada (si está activado)
+  function coverAccent(s) {
+    if (!A.settings.accentFromCover) return;
+    const url = s && (s.cover || (s.episodes[0] && s.episodes[0].thumb));
+    if (!url) { coverAccentUrl = ''; setAccentVars(baseAccent()); return; }
+    if (url === coverAccentUrl) return;
+    coverAccentUrl = url;
+    const img = new Image();
+    img.onload = () => {
+      if (coverAccentUrl !== url) return;
+      try {
+        const c = document.createElement('canvas'); c.width = c.height = 24;
+        const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0, 24, 24);
+        const d = x.getImageData(0, 0, 24, 24).data; const bk = {};
+        for (let i = 0; i < d.length; i += 4) {
+          const [h, sat, l] = rgbHsl([d[i], d[i + 1], d[i + 2]]);
+          if (l < 0.18 || l > 0.9 || sat < 0.25) continue;
+          const k = Math.round(h / 20); const w = sat * sat;
+          (bk[k] = bk[k] || { w: 0, r: 0, g: 0, b: 0 }); bk[k].w += w; bk[k].r += d[i] * w; bk[k].g += d[i + 1] * w; bk[k].b += d[i + 2] * w;
+        }
+        const best = Object.values(bk).sort((a, b) => b.w - a.w)[0];
+        setAccentVars(best ? paletteFrom([best.r / best.w, best.g / best.w, best.b / best.w]) : baseAccent());
+      } catch (e) { setAccentVars(baseAccent()); }
+    };
+    img.src = url;
+  }
+  const sysLight = matchMedia('(prefers-color-scheme: light)');
+  sysLight.addEventListener('change', () => { if ((A.settings.theme || 'dark') === 'system') applyTheme(); });
+  // Uso de la GPU: se detecta la tarjeta gráfica y se elige cuánto «cristal» y animación se puede permitir
+  let gpuInfo = null;
+  function detectGpu() {
+    if (gpuInfo) return gpuInfo;
+    let name = '';
+    try {
+      const c = document.createElement('canvas');
+      const g = c.getContext('webgl');
+      if (g) {
+        const ext = g.getExtension('WEBGL_debug_renderer_info');
+        name = String(ext ? g.getParameter(ext.UNMASKED_RENDERER_WEBGL) : g.getParameter(g.RENDERER));
+        const lose = g.getExtension('WEBGL_lose_context');
+        if (lose) lose.loseContext();
+      }
+    } catch (e) { /* */ }
+    const clean = name.replace(/^ANGLE \(|\)$/g, '').replace(/,? ?Direct3D.*$|,? ?D3D1\d.*$|,? ?OpenGL.*$|,? ?vs_\d.*$/i, '').replace(/^(Intel|NVIDIA|AMD|Google|Microsoft),\s*/i, '').replace(/\s*\(0x[0-9A-F]+\)/gi, '').trim();
+    let tier = 'balanced';
+    if (!name || /swiftshader|llvmpipe|basic render|software|microsoft basic/i.test(name)) tier = 'eco';
+    else if (/nvidia|geforce|quadro|rtx|gtx|radeon rx|radeon pro|radeon r9|arc\(tm\) a\d|arc a\d|\brx \d/i.test(name)) tier = 'quality';
+    gpuInfo = { name: clean || name || '—', tier };
+    return gpuInfo;
+  }
+  const GPU_LABELS = { quality: 'Calidad máxima', balanced: 'Equilibrado', eco: 'Ahorro' };
+  function gpuMode() {
+    const m = A.settings.gpuMode || 'auto';
+    return m === 'auto' ? detectGpu().tier : m;
+  }
+  function applyTheme() {
+    const st = A.settings;
+    const theme = st.theme || 'dark';
+    const light = theme === 'light' || (theme === 'system' && sysLight.matches);
+    const b = document.body.classList;
+    b.toggle('theme-light', light);
+    b.toggle('theme-oled', theme === 'oled');
+    b.toggle('perf', !!st.perfMode);
+    const gm = gpuMode();
+    b.toggle('gpu-balanced', gm === 'balanced');
+    b.toggle('gpu-eco', gm === 'eco');
+    b.toggle('no-bganim', st.bgAnim === false);
+    const root = document.documentElement.style;
+    const g = st.glassLevel == null ? 50 : st.glassLevel, bl = st.blurLevel == null ? 50 : st.blurLevel;
+    // sin desenfoque (ahorro) los paneles necesitan algo más de opacidad para leerse igual de bien
+    root.setProperty('--gk', ((0.3 + (g / 100) * 1.4) * (gm === 'eco' ? 1.35 : 1)).toFixed(2));
+    root.setProperty('--bk', (bl / 50).toFixed(2));
+    coverAccentUrl = '';
+    setAccentVars(baseAccent());
+    if (st.accentFromCover) coverAccent(A.view === 'player' ? Player.state.series : A.view === 'series' ? A.currentSeries : null);
+    const bg = $('#amb-custom');
+    b.toggle('has-bg', !!st.bgImage);
+    if (bg) { bg.style.backgroundImage = st.bgImage ? cssUrl(st.bgImage) : 'none'; root.setProperty('--bg-op', ((st.bgOpacity == null ? 45 : st.bgOpacity) / 100).toFixed(2)); }
+    window.cinema.setZoom(st.uiScale || 1);
+    window.cinema.setWinTheme(light);
+    b.toggle('no-rail', st.showRail === false);
+  }
+
+  // ------------------------------------------------------------ GRUPOS
+  const GROUP_TYPES = {
+    anime: { label: 'Anime', one: 'serie', many: 'series', web: 'AniList / MyAnimeList / Kitsu', hint: 'Series y películas de anime' },
+    series: { label: 'Series', one: 'serie', many: 'series', web: 'TVmaze / Wikipedia', hint: 'Series de TV y dramas' },
+    movies: { label: 'Películas', one: 'película', many: 'películas', web: 'Wikipedia', hint: 'Cada video suelto es una película' },
+    other: { label: 'Otros', one: 'título', many: 'títulos', web: '', hint: 'Videos personales, clases, etc.' },
+  };
+  const GROUP_ICONS = ['anime', 'film', 'tv', 'heart', 'smile', 'bolt', 'folder', 'music', 'game', 'book', 'kids', 'globe'];
+  const GROUP_COLORS = ['#a855f7', '#6366f1', '#22d3ee', '#34d399', '#f59e0b', '#f43f5e', '#ec4899', '#94a3b8'];
+  function curGroup() { return A.groups.find((g) => g.id === A.group) || A.groups[0] || { id: null, name: 'Biblioteca', type: 'anime', icon: 'folder', color: '#a855f7', roots: [] }; }
+  function groupOf(s) { return A.groups.find((g) => g.id === s.groupId) || curGroup(); }
+  function groupNoun(n, g = curGroup()) { const t = GROUP_TYPES[g.type] || GROUP_TYPES.other; return n === 1 ? t.one : t.many; }
+  function applyGroupFilter() {
+    const g = curGroup();
+    A.series = A.allSeries.filter((s) => s.groupId === g.id);
+  }
+  function setGroup(id) {
+    if (id === A.group || !A.groups.some((g) => g.id === id)) return;
+    A.group = id;
+    saveSettings({ activeGroup: id });
+    A.letter = 'all'; A.genre = null; A.selecting = false; A.selected.clear(); A.favOnly = false; A.durFilter = null;
+    applyGroupFilter();
+    renderRail(); updateGroupChrome();
+    if (A.view === 'series' || A.view === 'player') go('home');
+    else { renderCurrent(); if (A.view === 'home') setAmbient(heroSeries()); }
+    const v = $('#view-' + A.view); if (v) v.scrollTop = 0;
+  }
+  // Kuro (el oso de la esquina): un haz de luz recorre su contorno mientras algo se está procesando
+  const Busy = (() => {
+    const tasks = new Map();
+    let timer = 0;
+    function paint() {
+      const el = $('#kuro-bear');
+      if (!el) return;
+      el.classList.toggle('busy', tasks.size > 0);
+      el.title = tasks.size ? 'Kuro está trabajando: ' + [...tasks.values()].join(' · ') : 'Kuro: todo listo';
+    }
+    function set(key, label) {
+      tasks.set(key, label);
+      clearTimeout(timer); paint();
+    }
+    // al terminar se espera un momento, para que el haz no parpadee entre tareas seguidas
+    function clear(key) {
+      if (!tasks.delete(key)) return;
+      clearTimeout(timer); timer = setTimeout(paint, 600);
+    }
+    return { set, clear };
+  })();
+  function renderRail() {
+    const rail = $('#rail');
+    if (!rail) return;
+    const counts = new Map();
+    for (const s of A.allSeries) counts.set(s.groupId, (counts.get(s.groupId) || 0) + 1);
+    rail.innerHTML = A.groups.map((g) => {
+      const n = counts.get(g.id) || 0;
+      return `<button class="rail-item ${g.id === A.group ? 'active' : ''}" data-rail-group="${g.id}" style="--gc:${g.color}" title="${esc(g.name)} · ${n} ${groupNoun(n, g)} (clic derecho para opciones)">
+        <span class="rail-ico"><svg class="i"><use href="#i-g-${esc(g.icon)}"/></svg></span><b>${esc(g.name)}</b>${n ? `<small>${n}</small>` : ''}</button>`;
+    }).join('') + `<button class="rail-item add" data-rail-new title="Crear un grupo nuevo (películas, series, etc.)"><span class="rail-ico"><svg class="i"><use href="#i-plus"/></svg></span><b>Nuevo</b></button>`;
+    document.body.classList.toggle('no-rail', A.settings.showRail === false);
+  }
+  function updateGroupChrome() {
+    const g = curGroup();
+    const t = GROUP_TYPES[g.type] || GROUP_TYPES.other;
+    $('#search').placeholder = `Buscar en ${g.name}...`;
+    const empty = !A.allSeries.length && A.groups.length <= 1;
+    $('#empty-title').textContent = empty ? 'Tu videoteca está vacía' : `«${g.name}» está vacío`;
+    $('#empty-text').textContent = g.type === 'movies'
+      ? 'Agrega la carpeta donde guardas tus películas. Cada video suelto (o cada subcarpeta) se convierte en una película de la cartelera.'
+      : `Agrega la carpeta donde guardas tus ${t.many === 'títulos' ? 'videos' : g.type === 'anime' ? 'animes' : t.many}. Cada subcarpeta se convertirá en una tarjeta de la cartelera y sus videos en capítulos.`;
+    $('#btn-add-folder-empty span').textContent = `Agregar carpeta a «${g.name}»`;
+  }
+  async function saveGroups(list) {
+    const res = await window.cinema.saveGroups(list);
+    A.groups = res.groups; A.roots = res.roots;
+    if (!A.groups.some((g) => g.id === A.group)) A.group = A.groups[0] && A.groups[0].id;
+    applyGroupFilter(); renderRail(); updateGroupChrome();
+  }
+  function randomGroupId() { const b = new Uint8Array(4); crypto.getRandomValues(b); return 'g' + [...b].map((x) => x.toString(16).padStart(2, '0')).join(''); }
+  function openGroupEditor(g, after) {
+    const isNew = !g;
+    const d = g ? { ...g } : { id: randomGroupId(), name: '', icon: 'film', color: GROUP_COLORS[A.groups.length % GROUP_COLORS.length], type: 'movies', web: true, roots: [] };
+    const draw = () => {
+      openModal(`<h2>${isNew ? 'Nuevo grupo' : 'Editar grupo'}</h2>
+        <p class="sub">Los grupos separan tu biblioteca (por ejemplo Anime, Películas, Series). Cada uno aparece en el menú de la izquierda con sus propias carpetas.</p>
+        <div class="field"><label>Nombre</label><input type="text" id="ge-name" value="${esc(d.name)}" placeholder="Ej: Películas, Series, Clases..." maxlength="40" spellcheck="false"></div>
+        <div class="field"><label>Tipo de contenido</label><div class="g-types">${Object.entries(GROUP_TYPES).map(([k, t]) => `<button class="${d.type === k ? 'on' : ''}" data-ge-type="${k}"><b>${t.label}</b><span>${t.hint}</span></button>`).join('')}</div></div>
+        <div class="field"><label>Ícono</label><div class="g-icons" style="--gsel:${d.color}">${GROUP_ICONS.map((ic) => `<button class="${d.icon === ic ? 'on' : ''}" data-ge-icon="${ic}"><svg class="i"><use href="#i-g-${ic}"/></svg></button>`).join('')}</div></div>
+        <div class="field"><label>Color</label><div class="g-colors">${GROUP_COLORS.map((c) => `<button class="${d.color === c ? 'on' : ''}" data-ge-color="${c}" style="background:${c}"></button>`).join('')}<input type="color" id="ge-color" value="${d.color}" title="Otro color"></div></div>
+        <label class="switch"><input type="checkbox" id="ge-web" ${d.web ? 'checked' : ''} ${d.type === 'other' ? 'disabled' : ''}><span></span>Buscar datos en internet para este grupo${GROUP_TYPES[d.type].web ? ` (${GROUP_TYPES[d.type].web})` : ''}</label>
+        <div class="modal-actions">${!isNew && A.groups.length > 1 ? '<button class="btn glass danger" id="ge-del" style="margin-right:auto"><svg class="i"><use href="#i-trash"/></svg>Eliminar grupo</button>' : ''}<button class="btn glass" data-close>Cancelar</button><button class="btn primary" id="ge-save">${isNew ? 'Crear grupo' : 'Guardar'}</button></div>`);
+      const nameIn = $('#ge-name');
+      nameIn.oninput = () => { d.name = nameIn.value; };
+      $$('[data-ge-type]').forEach((b) => b.onclick = () => {
+        const prev = d.type; d.type = b.dataset.geType;
+        if (d.type === 'other') d.web = false; else if (prev === 'other') d.web = true;
+        if (isNew && !d.name.trim()) d.icon = { anime: 'anime', movies: 'film', series: 'tv', other: 'folder' }[d.type];
+        draw();
+      });
+      $$('[data-ge-icon]').forEach((b) => b.onclick = () => { d.icon = b.dataset.geIcon; draw(); });
+      $$('[data-ge-color]').forEach((b) => b.onclick = () => { d.color = b.dataset.geColor; draw(); });
+      $('#ge-color').onchange = (e) => { d.color = e.target.value; draw(); };
+      $('#ge-web').onchange = (e) => { d.web = e.target.checked; };
+      if ($('#ge-del')) $('#ge-del').onclick = () => deleteGroup(g, after);
+      $('#ge-save').onclick = async () => {
+        d.name = nameIn.value.trim() || GROUP_TYPES[d.type].label;
+        const list = isNew ? [...A.groups, d] : A.groups.map((x) => (x.id === d.id ? { ...x, ...d } : x));
+        await saveGroups(list);
+        closeModal();
+        if (isNew) {
+          setGroup(d.id);
+          toast(`Grupo «${esc(d.name)}» creado. Agrega sus carpetas.`, 4000);
+          if (!after) { await addFolders(d.id); }
+        } else { await scan(true); toast('Grupo actualizado'); }
+        if (after) after();
+      };
+      nameIn.focus();
+    };
+    draw();
+  }
+  async function deleteGroup(g, after) {
+    if (A.groups.length <= 1) return toast('Debe quedar al menos un grupo');
+    const n = A.allSeries.filter((s) => s.groupId === g.id).length;
+    const ok = await confirmBox({ title: `Eliminar el grupo «${g.name}»`, danger: true, ok: 'Eliminar grupo',
+      html: `<p>Se quitan del programa el grupo y sus ${g.roots.length} carpeta${g.roots.length === 1 ? '' : 's'} (${n} ${groupNoun(n, g)}). <b>Tus videos no se borran</b>; puedes volver a agregarlos en otro grupo.</p>` });
+    if (!ok) return;
+    if (Player.state.series && Player.state.series.groupId === g.id) Player.close();
+    await saveGroups(A.groups.filter((x) => x.id !== g.id));
+    closeModal();
+    await scan(true);
+    toast(`Grupo «${esc(g.name)}» eliminado`);
+    if (after) after();
+  }
+  function groupMenu(g, x, y) {
+    if (!g) return;
+    const i = A.groups.indexOf(g);
+    const move = async (dir) => { const list = [...A.groups]; list.splice(i, 1); list.splice(i + dir, 0, g); await saveGroups(list); };
+    ctxMenu(x, y, [
+      { icon: 'i-plus', label: 'Agregar carpeta a este grupo...', action: async () => { setGroup(g.id); await addFolders(g.id); } },
+      { icon: 'i-edit', label: 'Editar grupo (nombre, ícono, tipo)...', action: () => openGroupEditor(g) },
+      ...(g.web ? [{ icon: 'i-globe', label: 'Cargar datos de internet de este grupo', action: () => startWebFetch({ onlyMissing: true, groupId: g.id }) }] : []),
+      '-',
+      ...(i > 0 ? [{ icon: 'i-chev-l', label: 'Subir en el menú', action: () => move(-1) }] : []),
+      ...(i < A.groups.length - 1 ? [{ icon: 'i-chev-r', label: 'Bajar en el menú', action: () => move(1) }] : []),
+      ...(A.groups.length > 1 ? [{ icon: 'i-trash', label: 'Eliminar grupo...', action: () => deleteGroup(g) }] : []),
+    ]);
+  }
+
   // ------------------------------------------------------------ CARTELERA
   const LETTERS = ['all', '#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'];
   function firstLetter(t) {
@@ -413,6 +917,7 @@ const App = (() => {
     $$('#size-seg button').forEach((b) => b.classList.toggle('active', b.dataset.size === size));
     const grid = $('#poster-grid');
     grid.className = lview === 'list' ? 'list-grid' : 'poster-grid ' + size;
+    renderLibFilters();
     renderGenreBar();
     grid.classList.toggle('selecting', A.selecting);
     $('#btn-select').classList.toggle('active', A.selecting);
@@ -421,14 +926,39 @@ const App = (() => {
     if (q) list = list.filter((s) => s.title.toLowerCase().includes(q) || s.folderName.toLowerCase().includes(q)
       || altTitles(s).some((t) => t.toLowerCase().includes(q)) || genresOf(s).some((g) => g.toLowerCase().includes(q))
       || s.episodes.some((e) => e.name.toLowerCase().includes(q)));
+    if (A.favOnly) list = list.filter(isFavItem);
     const col = new Intl.Collator('es', { numeric: true, sensitivity: 'base' });
+    const favNote = A.favOnly ? ` · <b>favoritos</b> <button class="link-btn" data-fav-only>quitar filtro</button>` : '';
+    // filtro por duración: se muestran los videos sueltos que caen en ese rango
+    const bucket = A.durFilter && DUR_BUCKETS.find((b) => b.k === A.durFilter);
+    if (bucket) {
+      const vids = [];
+      for (const s of list) for (const ep of s.episodes) {
+        const d = epDur(ep);
+        if (d == null || !bucket.test(d)) continue;
+        if (A.favOnly && !s.fav && !ep.fav) continue;
+        if (q && !ep.name.toLowerCase().includes(q) && !s.title.toLowerCase().includes(q)) continue;
+        vids.push({ s, ep });
+      }
+      if (sort === 'recent') vids.sort((a, b) => (b.ep.addedAt || 0) - (a.ep.addedAt || 0));
+      else if (sort === 'az') vids.sort((a, b) => col.compare(a.ep.title, b.ep.title));
+      else vids.sort((a, b) => epDur(a.ep) - epDur(b.ep));
+      $('#lib-count').innerHTML = `${vids.length} ${vids.length === 1 ? 'video' : 'videos'} · ${bucket.label} <button class="link-btn" data-dur="">quitar filtro</button>${favNote}`;
+      A.visibleIds = [];
+      renderSelBar();
+      grid.className = 'vid-grid';
+      grid.innerHTML = vids.length ? vids.map(({ s, ep }) => vidCardHtml(s, ep)).join('')
+        : `<div class="muted" style="grid-column:1/-1;padding:40px;text-align:center">${A.durLoading ? 'Calculando duraciones…' : 'No hay videos de esa duración.'}</div>`;
+      vids.slice(0, 150).forEach(({ s, ep }) => { if (!ep.thumb) Thumbs.request(s, ep); });
+      return;
+    }
     if (sort === 'az') list.sort((a, b) => col.compare(a.title, b.title));
     if (sort === 'recent') list.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     if (sort === 'watched') list.sort((a, b) => seriesStats(b).lastTs - seriesStats(a).lastTs);
     if (sort === 'count') list.sort((a, b) => b.episodes.length - a.episodes.length);
     if (sort === 'score') list.sort((a, b) => ((b.web && b.web.score) || 0) - ((a.web && a.web.score) || 0));
     if (sort === 'year') list.sort((a, b) => ((b.web && b.web.year) || 0) - ((a.web && a.web.year) || 0));
-    $('#lib-count').innerHTML = `${list.length} ${list.length === 1 ? 'serie' : 'series'}${q ? ` · búsqueda «${esc($('#search').value.trim())}»` : ''}${A.genre ? ` · género <b>«${esc(A.genre)}»</b> <button class="link-btn" data-genre-clear>quitar filtro</button>` : ''}`;
+    $('#lib-count').innerHTML = `${list.length} ${groupNoun(list.length)}${q ? ` · búsqueda «${esc($('#search').value.trim())}»` : ''}${A.genre ? ` · género <b>«${esc(A.genre)}»</b> <button class="link-btn" data-genre-clear>quitar filtro</button>` : ''}${favNote}`;
     A.visibleIds = list.map((x) => x.id);
     renderSelBar();
     grid.innerHTML = list.length ? list.map(lview === 'list' ? listCardHtml : posterHtml).join('')
@@ -539,13 +1069,14 @@ const App = (() => {
           <div class="hero-tag"><span class="dot"></span>${s.web ? esc(s.web.typeEs || 'Serie') : 'Serie'}${s.splitFrom ? ` · parte de «${esc(s.splitFrom.name)}»` : ''}${s.web && s.web.url ? ` · <span class="src-link" data-open-web="${esc(s.web.url)}"><svg class="i"><use href="#i-globe"/></svg>Ver en ${esc(s.web.source)}</span>` : ''}</div>
           <h1>${esc(s.title)}</h1>
           ${altTitles(s).length ? `<div class="web-alt">${esc(altTitles(s).slice(0, 4).join(' · '))}</div>` : ''}
-          <div class="hero-meta">${s.web && s.web.score ? `<span>★ ${s.web.score}</span>` : ''}${s.web && s.web.year ? `<span>${s.web.year}</span>` : ''}${s.web && s.web.studios && s.web.studios.length ? `<span>${esc(s.web.studios.join(', '))}</span>` : ''}<span>${st.total}${s.web && s.web.episodes ? '/' + s.web.episodes : ''} capítulos</span><span>${st.watched} vistos</span>${s.groups.filter(Boolean).length ? `<span>${s.groups.filter(Boolean).length} temporadas / carpetas</span>` : ''}<span>${fmtSize(s.size)}</span></div>
+          <div class="hero-meta">${s.web && s.web.score ? `<span>★ ${s.web.score}</span>` : ''}${s.web && s.web.year ? `<span>${s.web.year}</span>` : ''}${s.web && s.web.studios && s.web.studios.length ? `<span>${esc(s.web.studios.join(', '))}</span>` : ''}<span>${st.total}${s.web && s.web.episodes ? '/' + s.web.episodes : ''} capítulos</span><span>${st.watched} ${st.watched === 1 ? 'visto' : 'vistos'}</span>${s.groups.filter(Boolean).length ? `<span>${s.groups.filter(Boolean).length} temporadas / carpetas</span>` : ''}<span>${fmtSize(s.size)}</span></div>
           ${genresOf(s).length ? `<div class="series-tags">${genresOf(s).map((g) => tagHtml(s, g)).join('')}</div>` : ''}
           ${!s.web && s.webStatus === 'doubt' && s.webCandidate ? `<div class="doubt-bar">¿Es <b>${esc(s.webCandidate.title)}</b>${s.webCandidate.year ? ' (' + s.webCandidate.year + ')' : ''}? <button class="btn primary" data-web-confirm="${s.id}">Sí, usar</button><button class="btn glass" data-web-pick="${s.id}">Elegir otro</button><button class="btn glass" data-web-reject="${s.id}">No es</button></div>` : ''}
           ${renameBar(s)}
           <p class="synopsis ${synopsisOf(s) ? '' : 'empty'}" id="series-synopsis" title="Clic para expandir">${synopsisOf(s) ? esc(synopsisOf(s)) : 'Sin sinopsis · clic en «Editar» para escribir una o buscarla en internet'}</p>
           <div class="series-actions">
             <button class="btn primary big" data-play-series="${s.id}"><svg class="i"><use href="#i-play"/></svg>${st.lastTs && !tgt.fresh ? 'Continuar ' + esc(epLabel(tgt.ep)) : 'Reproducir'}</button>
+            <button class="btn glass big ${s.fav ? 'fav-on' : ''}" data-fav-s="${s.id}"><svg class="i"><use href="#${s.fav ? 'i-heart-f' : 'i-heart'}"/></svg>${s.fav ? 'En favoritos' : 'Favorito'}</button>
             <button class="btn glass big" id="s-cover"><svg class="i"><use href="#i-image"/></svg>Portada</button>
             <button class="btn glass big" id="s-backdrop"><svg class="i"><use href="#i-image"/></svg>Fondo</button>
             <button class="btn glass big" id="s-edit"><svg class="i"><use href="#i-edit"/></svg>Editar</button>
@@ -561,16 +1092,19 @@ const App = (() => {
     $('#series-groups').innerHTML = groups.length > 1
       ? `<button class="chip ${A.groupFilter == null ? 'active' : ''}" data-group="__all__">Todos</button>` + groups.map((g) => `<button class="chip ${A.groupFilter === g ? 'active' : ''}" data-group="${esc(g)}">${esc(g || 'Principal')}</button>`).join('')
       : '';
-    const eps = s.episodes.filter((e) => A.groupFilter == null || e.group === A.groupFilter);
-    $('#series-episodes').innerHTML = eps.map((e, i) => {
+    renderSeriesDur(s);
+    const sb = A.serDur && DUR_BUCKETS.find((b) => b.k === A.serDur);
+    const eps = s.episodes.filter((e) => (A.groupFilter == null || e.group === A.groupFilter) && (!sb || (epDur(e) != null && sb.test(epDur(e)))) && (!A.serFav || e.fav));
+    if (s.episodes.some((e) => epDur(e) == null && !e.durTried)) loadDurations();
+    $('#series-episodes').innerHTML = !eps.length && (sb || A.serFav) ? `<div class="muted" style="grid-column:1/-1;padding:30px;text-align:center">${A.durLoading ? 'Calculando duraciones…' : sb ? 'No hay videos de esa duración en esta carpeta.' : 'No hay favoritos en esta carpeta.'}</div>` : eps.map((e, i) => {
       const p = A.progress[e.path];
       return `<div class="ep-card ${p && p.w ? 'watched' : ''}" data-play-ep="${e.id}" data-sid="${s.id}" style="animation-delay:${Math.min(i, 20) * 25}ms">
         <div class="thumb" data-thumb="${e.id}" ${epThumbStyle(e, s)}>
           <span class="ep-badge">${e.num != null ? 'EP ' + e.num : 'EP ' + (i + 1)}</span>${e.isNew ? '<span class="ep-new">NUEVO</span>' : ''}
           ${p && p.w ? '<span class="watched-mark"><svg class="i"><use href="#i-check"/></svg></span>' : ''}
-          ${p && p.d ? `<span class="dur-badge">${fmtTime(p.d)}</span>` : ''}
+          ${epDur(e) ? `<span class="dur-badge">${fmtTime(epDur(e))}</span>` : ''}
           <div class="play-o"><span><svg class="i"><use href="#i-play"/></svg></span></div>
-          ${eyeBtn(e, s)}
+          ${eyeBtn(e, s)}${favEpBtn(e, s)}
           ${progressBar(e)}
         </div>
         <div class="e-t">${esc(epLabel(e))}</div>
@@ -588,16 +1122,20 @@ const App = (() => {
 
   // ------------------------------------------------------------ PANEL DE CAPÍTULOS (vista reproductor)
   function renderPanel(scrollToCurrent) {
-    const { series: s, ep: cur } = Player.state;
-    if (!s) return;
+    const { series: owner, ep: cur, playlist: pl } = Player.state;
+    if (!owner) return;
+    const s = pl || owner;
     $('#ep-panel-title').textContent = s.title;
     const st = seriesStats(s);
     const idx = s.episodes.findIndex((e) => e.id === (cur && cur.id));
-    $('#ep-panel-sub').textContent = `Capítulo ${idx + 1} de ${s.episodes.length} · ${st.watched} vistos`;
-    const groups = s.groups;
+    $('#ep-panel-sub').textContent = pl ? `Video ${idx + 1} de ${s.episodes.length} · lista de favoritos` : `Capítulo ${idx + 1} de ${s.episodes.length} · ${st.watched} ${st.watched === 1 ? 'visto' : 'vistos'}`;
+    const groups = pl ? [] : s.groups;
     if (A.panelGroup && !groups.includes(A.panelGroup)) A.panelGroup = null;
+    // con muchas carpetas la barra se pliega para dejar sitio a la lista de videos
+    const gOpen = A.settings.panelGroupsOpen != null ? A.settings.panelGroupsOpen : groups.length <= 6;
     $('#ep-panel-groups').innerHTML = groups.length > 1
-      ? `<button class="chip ${A.panelGroup == null ? 'active' : ''}" data-pgroup="__all__">Todos</button>` + groups.map((g) => `<button class="chip ${A.panelGroup === g ? 'active' : ''}" data-pgroup="${esc(g)}">${esc(g || 'Principal')}</button>`).join('')
+      ? `<button class="pg-toggle ${gOpen ? 'open' : ''}" data-pg-toggle title="${gOpen ? 'Contraer carpetas' : 'Mostrar carpetas'}"><span class="pg-arrow">▸</span>Carpetas · <b>${esc(A.panelGroup == null ? 'Todas' : A.panelGroup || 'Principal')}</b><small>${groups.length}</small></button>`
+        + (gOpen ? `<div class="pg-chips"><button class="chip ${A.panelGroup == null ? 'active' : ''}" data-pgroup="__all__">Todos</button>` + groups.map((g) => `<button class="chip ${A.panelGroup === g ? 'active' : ''}" data-pgroup="${esc(g)}">${esc(g || 'Principal')}</button>`).join('') + '</div>' : '')
       : '';
     const q = $('#ep-filter').value.trim().toLowerCase();
     let lastGroup = null;
@@ -608,16 +1146,17 @@ const App = (() => {
       if (groups.length > 1 && A.panelGroup == null && e.group !== lastGroup) { lastGroup = e.group; html += `<div class="ep-group-label">${esc(e.group || 'Principal')}</div>`; }
       const p = A.progress[e.path];
       const isCur = cur && e.id === cur.id;
-      html += `<div class="ep-item ${isCur ? 'current' : ''}" data-play-ep="${e.id}" data-sid="${s.id}">
+      const es = pl ? pl.ownerOf(e) || owner : s;
+      html += `<div class="ep-item ${isCur ? 'current' : ''}" data-play-ep="${e.id}" data-sid="${es.id}" ${pl ? 'data-pl="cur"' : ''}>
         <div class="thumb" data-thumb="${e.id}" ${epThumbStyle(e, s)}>
           <span class="ep-no">${e.num != null ? 'EP ' + e.num : i + 1}</span>${e.isNew ? '<span class="ep-new">NUEVO</span>' : ''}
           <div class="eq"><div class="eq-bars"><i></i><i></i><i></i><i></i></div></div>
-          ${eyeBtn(e, s)}
+          ${eyeBtn(e, es)}${favEpBtn(e, es)}
           ${progressBar(e)}
         </div>
         <div class="info">
-          <div class="t">${esc(epLabel(e))}</div>
-          <div class="s">${e.num != null ? `<span>${esc(e.title)}</span>` : ''}</div>
+          <div class="t">${esc(pl ? e.title : epLabel(e))}</div>
+          <div class="s">${pl ? `<span>${esc(es.title)}</span>` : e.num != null ? `<span>${esc(e.title)}</span>` : ''}</div>
           <div class="s">${p && p.w ? '<span class="ok"><svg class="i"><use href="#i-check"/></svg>Visto</span>' : p && p.d ? `<span>${fmtTime(p.t)} / ${fmtTime(p.d)}</span>` : `<span>${fmtSize(e.size)}</span>`}</div>
         </div>
       </div>`;
@@ -626,8 +1165,8 @@ const App = (() => {
     $('#ep-list').innerHTML = html || '<div class="muted" style="padding:20px;text-align:center">Sin resultados</div>';
     if (scrollToCurrent) {
       requestAnimationFrame(() => {
-        const c = $('#ep-list .current');
-        if (c) c.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        const c = $('#ep-list .current'), box = $('#ep-list');
+        if (c) box.scrollTo({ top: box.scrollTop + c.getBoundingClientRect().top - box.getBoundingClientRect().top - (box.clientHeight - c.offsetHeight) / 2, behavior: 'smooth' });
       });
     }
   }
@@ -663,7 +1202,7 @@ const App = (() => {
     if (s.web && s.web.score) chips.push(`<span class="mini-chip"><span style="color:#fbbf24">★</span> ${s.web.score}</span>`);
     chips.push(webChips(s, 4));
     chips.push(`<span class="mini-chip cyan">${st.total}${s.web && s.web.episodes ? '/' + s.web.episodes : ''} capítulos</span>`);
-    chips.push(`<span class="mini-chip ok">✓ ${st.watched} vistos</span>`);
+    chips.push(`<span class="mini-chip ok">✓ ${st.watched} ${st.watched === 1 ? 'visto' : 'vistos'}</span>`);
     box.innerHTML = `
       ${alts.length ? `<div class="lcard-alt" title="${esc(alts.join(', '))}">${esc(alts.join(', '))}</div>` : ''}
       <div class="chips">${chips.join('')}</div>
@@ -706,12 +1245,15 @@ const App = (() => {
   }
   function renderAll() {
     renderCurrent();
+    renderRail();
     if (Player.state.series) renderNowExtra(A.byId.get(Player.state.series.id) || Player.state.series);
     if (A.view !== 'home') renderHome();
   }
 
   function playEpisode(s, ep, opts) {
     Player.load(s, ep, opts || {});
+    // con el reproductor minimizado, elegir otro video lo cambia ahí mismo (volver a elegir el mismo lo maximiza)
+    if (Player.mode === 'mini') return;
     go('player');
   }
   function playSeries(s) {
@@ -898,10 +1440,13 @@ const App = (() => {
   // ------------------------------------------------------------ datos de internet
   function confClass(c) { return c >= 0.8 ? 'hi' : c >= 0.45 ? 'mid' : 'lo'; }
   function webPick(s) {
+    const g = groupOf(s);
+    const t = GROUP_TYPES[g.type] || GROUP_TYPES.other;
     openModal(`
       <h2>Buscar «${esc(s.searchName || s.folderName)}» en internet</h2>
-      <p class="sub">Elige el anime correcto. Se guardan título oficial, descripción, géneros, estudio, año, puntuación y portada (fuente: AniList / MyAnimeList).</p>
+      <p class="sub">Elige el resultado correcto. Se guardan título oficial, descripción, géneros, año, puntuación y portada${t.web ? ` (fuentes: ${t.web})` : ''}.</p>
       <div class="search-row field" style="margin:0"><input type="text" id="wp-q" value="${esc(s.searchName || s.folderName)}" spellcheck="false"><button class="btn primary" id="wp-go"><svg class="i"><use href="#i-search"/></svg>Buscar</button></div>
+      <div class="url-row"><input type="text" class="sel" id="wp-url" placeholder="¿No aparece? Pega el enlace de su página en AniList, MyAnimeList, Kitsu, TVmaze o Wikipedia" spellcheck="false"><button class="btn glass" id="wp-url-go"><svg class="i"><use href="#i-link"/></svg>Vincular</button><button class="btn glass" id="wp-google" title="Buscar en Google (se abre el navegador)"><svg class="i"><use href="#i-globe"/></svg>Google</button></div>
       <label class="switch" style="margin-top:12px"><input type="checkbox" id="wp-cover" ${s.hasFolderCover || (s.hasCustomCover && !s.coverFromWeb) ? '' : 'checked'}><span></span>Usar también la portada de internet${s.hasFolderCover ? ' (reemplaza la de la carpeta solo en la app)' : ''}</label>
       <div class="web-results" id="wp-res"><div class="muted small">Buscando...</div></div>
       <div class="modal-actions"><button class="btn glass" data-close>Cerrar</button></div>`);
@@ -910,12 +1455,12 @@ const App = (() => {
       if (!q) return;
       $('#wp-res').innerHTML = '<div class="muted small">Buscando...</div>';
       try {
-        const res = await window.cinema.webSearch(q);
+        const res = await window.cinema.webSearch(q, g.type === 'other' ? 'anime' : g.type);
         if (!$('#wp-res')) return;
         $('#wp-res').innerHTML = res.length ? res.map((c, i) => `<div class="web-res">
           <img src="${esc(c.image)}" alt="" loading="lazy">
           <div class="wr-body">
-            <div class="wr-t">${esc(c.title)} <span class="conf ${confClass(c.confidence)}">${Math.round(c.confidence * 100)}%</span></div>
+            <div class="wr-t">${esc(c.title)} <span class="conf ${confClass(c.confidence)}">${Math.round(c.confidence * 100)}%</span><span class="src">${esc(c.source)}</span></div>
             <div class="wr-s">${esc([c.titleEn, c.titleJp].filter(Boolean).join(' · '))}</div>
             <div class="chips">${c.year ? `<span class="mini-chip">${c.year}</span>` : ''}${c.typeEs ? `<span class="mini-chip">${esc(c.typeEs)}</span>` : ''}${c.episodes ? `<span class="mini-chip cyan">${c.episodes} ep.</span>` : ''}${c.score ? `<span class="mini-chip">★ ${c.score}</span>` : ''}${(c.studios || []).slice(0, 1).map((x) => `<span class="mini-chip accent">${esc(x)}</span>`).join('')}</div>
           </div>
@@ -934,6 +1479,24 @@ const App = (() => {
     };
     $('#wp-go').onclick = run;
     $('#wp-q').onkeydown = (e) => { if (e.key === 'Enter') run(); };
+    $('#wp-google').onclick = () => window.cinema.openWeb('https://www.google.com/search?q=' + encodeURIComponent(`${$('#wp-q').value.trim()} ${g.type === 'movies' ? 'película' : g.type === 'series' ? 'serie' : 'anime'} anilist OR myanimelist OR wikipedia`));
+    const link = async () => {
+      const url = $('#wp-url').value.trim();
+      if (!url) return;
+      $('#wp-url-go').disabled = true;
+      try {
+        const c = await window.cinema.webFromUrl(url);
+        await window.cinema.webApply(s.id, c, { cover: $('#wp-cover').checked, overwriteCover: $('#wp-cover').checked, translate: A.settings.translateSynopsis !== false });
+        closeModal();
+        await scan(true);
+        toast(`Vinculado a «${esc(c.title)}» (${esc(c.source)})`);
+      } catch (e) {
+        $('#wp-url-go').disabled = false;
+        toast(esc(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')), 4500);
+      }
+    };
+    $('#wp-url-go').onclick = link;
+    $('#wp-url').onkeydown = (e) => { if (e.key === 'Enter') link(); };
     run();
   }
   async function webConfirm(s) {
@@ -965,6 +1528,7 @@ const App = (() => {
   }
   window.cinema.onWebProgress(async (d) => {
     webRun = d.finished ? null : { ...d };
+    if (d.finished) Busy.clear('web'); else Busy.set('web', `Buscando datos en internet (${d.done}/${d.total})`);
     showWebPill();
     const prog = $('#web-prog');
     if (prog) {
@@ -1049,7 +1613,9 @@ const App = (() => {
   }
   function webStats() {
     let ok = 0, doubt = 0, none = 0, pending = 0;
-    for (const s of A.series) {
+    const webGroups = new Set(A.groups.filter((g) => g.web).map((g) => g.id));
+    for (const s of A.allSeries) {
+      if (!webGroups.has(s.groupId)) continue;
       if (s.web) ok++; else if (s.webStatus === 'doubt') doubt++; else if (s.webStatus === 'none') none++; else pending++;
     }
     return { ok, doubt, none, pending };
@@ -1117,6 +1683,45 @@ const App = (() => {
       ['JPG', 'd'], ['PNG', 'd'], ['WebP', 'd'], ['GIF', 'd'], ['BMP', 'd'], ['AVIF', 'd']] },
   ];
   const CHANGELOG = [
+    { v: '2.1.3', name: 'Favoritos', date: 'Octubre 2026', items: [
+      'Los videos favoritos son una lista de reproducción propia: al reproducir uno desde Favoritos, «Siguiente» y la lista lateral siguen solo los favoritos, estén en la carpeta que estén',
+      'En la lista lateral del reproductor la barra de carpetas se puede contraer (se contrae sola si hay muchas) para dejar más espacio a los videos',
+      'Corregido: al llegar al final de la lista lateral el video principal ya no se desplaza hacia abajo',
+      'Filtro de favoritos dentro de cada carpeta o serie de la cartelera',
+      'Botón «Invitar un café en Ko-fi» en Acerca de para apoyar el proyecto',
+      'Con el reproductor minimizado (I), elegir otro video en la cartelera o en una carpeta lo cambia en el mini reproductor sin maximizarlo; elegir de nuevo el mismo video lo maximiza',
+    ] },
+    { v: '2.1.2', name: 'Favoritos', date: 'Octubre 2026', items: [
+      'Kuro, el oso de la esquina inferior del menú de grupos: un haz de luz recorre su contorno mientras se generan miniaturas, se revisa la biblioteca, se miden duraciones o se buscan datos en internet (al pasar el mouse dice qué está haciendo)',
+    ] },
+    { v: '2.1.1', name: 'Favoritos', date: 'Octubre 2026', items: [
+      'Al abrir una serie o carpeta cada video muestra su duración',
+      'El filtro por duración también funciona dentro de las carpetas de los grupos «Otros» (si venías filtrando en la cartelera, la carpeta se abre con el mismo filtro)',
+    ] },
+    { v: '2.1.0', name: 'Favoritos', date: 'Octubre 2026', items: [
+      'Favoritos ♥ en todos los grupos: marca series, películas o videos sueltos desde la tarjeta, la página de la serie o el clic derecho',
+      'Nueva sección «Favoritos» en el Inicio (se activa o desactiva en Ajustes → Apariencia) y filtro de favoritos en la cartelera',
+      'Grupos «Otros»: filtro por duración de los videos (menos de 1 minuto, de 1 a 5, de 5 a 10, de 10 a 30 y más de 30 minutos); la duración se mide una sola vez y queda guardada',
+    ] },
+    { v: '2.0.1', name: 'Horizonte', date: 'Septiembre 2026', items: [
+      'Mucho menos uso de la tarjeta gráfica, sobre todo en equipos con gráfica integrada (Intel/AMD): en Inicio baja de ~70 % a ~10 % y viendo un video de ~70 % a entre 10 % y 35 %',
+      'Nuevo ajuste «Uso de la tarjeta gráfica» (Apariencia): Automático detecta tu gráfica y elige Calidad máxima, Equilibrado o Ahorro',
+      'El fondo animado se pausa mientras ves un video o si la ventana no está en primer plano',
+      'La luz ambiental se calcula en un lienzo diminuto: se ve igual y cuesta una décima parte',
+      'El color por GPU solo se usa cuando hace falta; los ajustes simples van por filtros más livianos',
+    ] },
+    { v: '2.0.0', name: 'Horizonte', date: 'Septiembre 2026', items: [
+      'Grupos personalizables en un menú lateral (Anime, Películas, Series, Otros…): cada uno con sus carpetas, ícono, color y su propia búsqueda en internet (o sin ella)',
+      'Más fuentes para reconocer títulos: TVmaze y Wikipedia, además de AniList, MyAnimeList y Kitsu; y se puede vincular pegando el enlace de la página',
+      'Rendimiento: los saltos al abrir un video en modo compatible ya no se quedan trabados; precarga del siguiente capítulo y panel de diagnóstico (Shift+D)',
+      'Personalización: tema claro, oscuro, negro OLED o automático; color de acento (o según la portada); transparencia y desenfoque del cristal; imagen de fondo propia; tamaño de la interfaz y modo rendimiento',
+      'Saltar opening y ending con marcas de AniSkip o las tuyas (clic derecho sobre el video)',
+      'Perfiles: cada persona con su propio progreso y «Continuar viendo»',
+      'Copia de seguridad: exporta y restaura toda tu biblioteca en un archivo',
+      'Aviso de versiones nuevas desde GitHub, con descarga e instalación desde la app',
+      'Mejora de imagen para anime: escalado a la resolución de la pantalla y líneas más nítidas por GPU (Shift+E)',
+      'Interfaz en inglés (Ajustes → Apariencia → Idioma)',
+    ] },
     { v: '1.7.1', name: 'Control', date: 'Septiembre 2026', items: ['Detecta bien el número de capítulo en nombres como «1x01», «Hielo03» o «Serie_01.Grupo»', 'Instalador para Windows (setup.exe)'] },
     { v: '1.7.0', name: 'Control', date: 'Septiembre 2026', items: ['Al abrir un capítulo a medias pregunta si continuar o empezar de cero (continúa solo a los 5 s)', 'Restablecer Kuro Player: deja la app como recién instalada', 'Quitar todas las carpetas y borrar progreso ahora piden confirmación en una ventana clara', 'Los preajustes del panel de color ya no pausan el video'] },
     { v: '1.6.1', name: 'Kuro', date: 'Septiembre 2026', items: ['Nuevo nombre: Kuro Player (tu biblioteca y progreso se conservan)', 'Identificar reproductores instalados y «Abrir con» para cada uno'] },
@@ -1130,7 +1735,7 @@ const App = (() => {
   ];
   function libraryTotals() {
     let eps = 0, size = 0, secs = 0, watched = 0, withWeb = 0;
-    for (const s of A.series) {
+    for (const s of A.allSeries) {
       eps += s.episodes.length; size += s.size; if (s.web) withWeb++;
       for (const e of s.episodes) {
         const p = A.progress[e.path];
@@ -1139,7 +1744,7 @@ const App = (() => {
         if (p.w) watched++;
       }
     }
-    return { series: A.series.length, eps, size, hours: secs / 3600, watched, withWeb };
+    return { series: A.allSeries.length, eps, size, hours: secs / 3600, watched, withWeb, groups: A.groups.length };
   }
   function aboutBody() {
     const info = A.appInfo || {};
@@ -1152,8 +1757,8 @@ const App = (() => {
         <img class="about-logo" src="icon.png" alt="">
         <div class="about-title">
           <h1>Kuro<b>Player</b></h1>
-          <div class="about-ver"><span class="ver-pill">v${esc(info.version || '1.7.1')}</span><span class="ver-name">«${esc(CHANGELOG[0].name)}»</span><span class="muted small">${esc(CHANGELOG[0].date)}</span></div>
-          <p>Videoteca local para tu anime: cartelera con portadas, reproductor moderno con efectos de cristal, color por GPU y compatibilidad universal de formatos.</p>
+          <div class="about-ver"><span class="ver-pill">v${esc(info.version || '2.1.3')}</span><span class="ver-name">«${esc(CHANGELOG[0].name)}»</span><span class="muted small">${esc(CHANGELOG[0].date)}</span></div>
+          <p>Videoteca local para tu anime, películas y series: cartelera con portadas, reproductor moderno con efectos de cristal, color por GPU y compatibilidad universal de formatos.</p>
         </div>
       </div>
 
@@ -1189,7 +1794,14 @@ const App = (() => {
         </div>
         <div class="set-actions" style="margin-top:14px">
           <button class="btn glass" id="about-data"><svg class="i"><use href="#i-folder"/></svg>Abrir carpeta de datos</button>
+          <button class="btn primary" id="about-update"><svg class="i"><use href="#i-refresh"/></svg>Buscar actualizaciones</button>
+          <button class="btn glass" id="about-github"><svg class="i"><use href="#i-globe"/></svg>Página del proyecto</button>
         </div>
+        ${rowSwitch('updateCheck', 'Avisar cuando haya una versión nueva', 'Al abrir la app se revisa GitHub; nunca se instala nada sin que lo confirmes.')}
+      </div>
+      <div class="set-card kofi-card"><h4><svg class="i"><use href="#i-heart-f"/></svg>Apoyar el proyecto</h4>
+        <p>Kuro Player es gratis, sin anuncios y sin cuentas. Si te gusta y quieres apoyar su desarrollo, puedes invitarme un café en Ko-fi.</p>
+        <div class="set-actions"><button class="btn kofi" id="about-kofi"><span class="cup">☕</span>Invitar un café en Ko-fi</button></div>
       </div>
 
       <div class="set-card">
@@ -1204,7 +1816,7 @@ const App = (() => {
       <div class="set-card about-credits">
         <h4><svg class="i"><use href="#i-globe"/></svg>Créditos</h4>
         <p><b>FFmpeg</b> — decodificación y conversión de formatos (LGPL/GPL) · <b>Electron / Chromium</b> — base de la aplicación</p>
-        <p><b>AniList</b>, <b>Kitsu</b> y <b>MyAnimeList (Jikan)</b> — información de series · <b>Google Translate</b> — traducción de descripciones</p>
+        <p><b>AniList</b>, <b>Kitsu</b> y <b>MyAnimeList (Jikan)</b> — información de series · <b>Google Translate</b> — traducción de descripciones · <b>TVmaze</b> y <b>Wikipedia</b> — series y películas · <b>AniSkip</b> — marcas de opening y ending · <b>Anime4K</b> (bloc97, MIT) — idea de la mejora de imagen</p>
         <p class="muted small">Hecho para uso personal. Todos tus datos se guardan solo en este equipo.</p>
       </div>`;
   }
@@ -1213,36 +1825,49 @@ const App = (() => {
     if (tab === 'about') return aboutBody();
     if (tab === 'library') {
       const byRoot = new Map();
-      for (const s of A.series) {
+      for (const s of A.allSeries) {
         const k = (s.root || '').toLowerCase();
         const v = byRoot.get(k) || { series: 0, eps: 0, size: 0 };
         v.series++; v.eps += s.episodes.length; v.size += s.size;
         byRoot.set(k, v);
       }
-      const cards = A.rootsInfo.length ? A.rootsInfo.map((r) => {
+      const folderCard = (r) => {
         const st = byRoot.get(r.path.toLowerCase()) || { series: 0, eps: 0, size: 0 };
         const name = r.path.split(/[\\/]/).filter(Boolean).pop() || r.path;
         return `<div class="folder-card ${r.exists ? '' : 'missing'}">
           <div class="folder-ico"><svg class="i"><use href="#i-folder"/></svg></div>
           <div class="folder-info"><b>${esc(name)}</b><span title="${esc(r.path)}">${esc(r.path)}</span>
-            <div class="chips">${r.exists ? `<span class="mini-chip accent">${st.series} series</span><span class="mini-chip cyan">${st.eps} capítulos</span><span class="mini-chip">${fmtSize(st.size) || '0 B'}</span>` : '<span class="mini-chip bad">La carpeta no existe o el disco no está conectado</span>'}</div>
+            <div class="chips">${r.exists ? `<span class="mini-chip accent">${st.series} ${groupNoun(st.series, A.groups.find((g) => g.id === r.groupId) || curGroup())}</span>${(A.groups.find((g) => g.id === r.groupId) || {}).type === 'movies' ? '' : `<span class="mini-chip cyan">${st.eps} capítulos</span>`}<span class="mini-chip">${fmtSize(st.size) || '0 B'}</span>` : '<span class="mini-chip bad">La carpeta no existe o el disco no está conectado</span>'}</div>
           </div>
           ${r.exists ? `<button class="btn glass" data-root-refresh="${esc(r.path)}" title="Buscar series y capítulos nuevos en esta carpeta"><svg class="i"><use href="#i-refresh"/></svg>Actualizar</button>
           <button class="icon-btn" data-root-open="${esc(r.path)}" title="Abrir en el explorador"><svg class="i"><use href="#i-external"/></svg></button>` : ''}
+          ${A.groups.length > 1 ? `<button class="icon-btn" data-move-root="${esc(r.path)}" title="Mover a otro grupo"><svg class="i"><use href="#i-grid"/></svg></button>` : ''}
           <button class="btn glass danger" data-rm-root="${esc(r.path)}"><svg class="i"><use href="#i-trash"/></svg>Quitar</button>
         </div>`;
-      }).join('') : '<div class="folder-empty">No hay carpetas. Agrega la carpeta donde guardas tu anime.</div>';
+      };
+      const groupCards = A.groups.map((g) => {
+        const roots = A.rootsInfo.filter((r) => r.groupId === g.id);
+        const n = A.allSeries.filter((s) => s.groupId === g.id).length;
+        const t = GROUP_TYPES[g.type] || GROUP_TYPES.other;
+        return `<div class="set-card group-card" style="--gc:${g.color}">
+          <div class="gc-head"><span class="rail-ico"><svg class="i"><use href="#i-g-${esc(g.icon)}"/></svg></span>
+            <div><b>${esc(g.name)}</b><span>${t.label} · ${n} ${groupNoun(n, g)} · ${roots.length} carpeta${roots.length === 1 ? '' : 's'} · ${g.web ? 'busca datos en internet' : 'sin búsqueda en internet'}</span></div>
+            <button class="btn glass" data-g-add="${g.id}"><svg class="i"><use href="#i-plus"/></svg>Carpeta</button>
+            <button class="icon-btn" data-g-edit="${g.id}" title="Editar grupo"><svg class="i"><use href="#i-edit"/></svg></button></div>
+          <div class="folder-list">${roots.length ? roots.map(folderCard).join('') : `<div class="folder-empty">Sin carpetas. Pulsa «Carpeta» para agregar tus ${t.many}.</div>`}</div>
+        </div>`;
+      }).join('');
       return `
-        <div class="folder-drop" id="set-drop"><svg class="i"><use href="#i-plus"/></svg><b>Agregar carpeta</b><br>Haz clic aquí o arrastra carpetas a esta ventana</div>
         <div class="set-card">
-          <h4><svg class="i"><use href="#i-folder"/></svg>Carpetas que lee la cartelera <small class="muted" style="font-weight:600">(${A.rootsInfo.length})</small></h4>
-          <p>Los archivos nunca se modifican ni se borran; «Quitar» solo deja de mostrarlos en la app.</p>
-          <div class="set-actions" style="margin:0 0 14px">
+          <h4><svg class="i"><use href="#i-grid"/></svg>Grupos y carpetas <small class="muted" style="font-weight:600">(${A.groups.length} grupos · ${A.rootsInfo.length} carpetas)</small></h4>
+          <p>Cada grupo tiene sus propias carpetas y aparece en el menú de la izquierda; lo de un grupo no se mezcla con otro. Los archivos nunca se modifican ni se borran: «Quitar» solo deja de mostrarlos en la app.</p>
+          <div class="set-actions" style="margin:0">
+            <button class="btn primary" id="set-new-group"><svg class="i"><use href="#i-plus"/></svg>Nuevo grupo</button>
             <button class="btn glass" id="set-rescan"><svg class="i"><use href="#i-refresh"/></svg>Actualizar todas</button>
             ${A.rootsInfo.length ? `<button class="btn glass danger" id="set-clear-roots"><svg class="i"><use href="#i-trash"/></svg>Quitar todas las carpetas</button>` : ''}
           </div>
-          <div class="folder-list">${cards}</div>
         </div>
+        ${groupCards}
         <div class="set-card">
           <h4><svg class="i"><use href="#i-grid"/></svg>Temporadas en subcarpetas</h4>
           ${rowSwitch('splitSeasons', 'Separar temporadas por defecto', 'Si la carpeta de una serie tiene subcarpetas (ej. «Nombre 1», «Nombre 2»), cada una aparece como una tarjeta propia. Si está apagado se agrupan en una sola serie con pestañas.', false)}
@@ -1284,10 +1909,10 @@ const App = (() => {
           <div class="review-list" id="rename-list"></div>
           <div class="set-actions" style="margin-top:12px" id="rename-all-wrap"></div>
         </div>
-        ${A.series.some((x) => x.keepName) ? `<div class="set-card">
+        ${A.allSeries.some((x) => x.keepName) ? `<div class="set-card">
           <h4><svg class="i"><use href="#i-check"/></svg>Carpetas con nombre conservado</h4>
           <p>No se sugiere renombrarlas aunque el título oficial sea distinto.</p>
-          <div class="review-list">${A.series.filter((x) => x.keepName).map((x) => `<div class="review-item">${x.cover ? `<img src="${esc(x.cover)}" alt="">` : ''}
+          <div class="review-list">${A.allSeries.filter((x) => x.keepName).map((x) => `<div class="review-item">${x.cover ? `<img src="${esc(x.cover)}" alt="">` : ''}
             <div class="ri-t"><b>${esc(x.folderName)}</b><span>${x.web ? 'Oficial: ' + esc(officialName(x)) : ''}</span></div>
             <button class="btn glass" data-unkeep="${x.id}">Volver a sugerir</button></div>`).join('')}</div>
         </div>` : ''}
@@ -1321,7 +1946,19 @@ const App = (() => {
           <div class="set-row"><div class="lbl"><b>Borrar todo el progreso</b><span>Olvida posiciones guardadas y capítulos vistos de toda la biblioteca.</span></div>
             <button class="btn glass danger" id="set-clear-progress"><svg class="i"><use href="#i-trash"/></svg>Borrar progreso</button></div>
         </div>
+        <div class="set-card"><h4><svg class="i"><use href="#i-folder"/></svg>Copia de seguridad</h4>
+          <p>Guarda en un archivo tus grupos, carpetas, progreso de todos los perfiles, datos de internet, categorías, ajustes y portadas. Útil para cambiar de PC o reinstalar.</p>
+          <div class="set-actions"><button class="btn primary" id="bk-export"><svg class="i"><use href="#i-folder"/></svg>Exportar copia...</button><button class="btn glass" id="bk-import"><svg class="i"><use href="#i-refresh"/></svg>Restaurar copia...</button></div>
+        </div>
+        <div class="set-card"><h4><svg class="i"><use href="#i-color"/></svg>Mejora de imagen</h4>
+          <div class="set-row"><div class="lbl"><b>Escalado y líneas nítidas para anime</b><span>Escala el video a la resolución de tu pantalla en la tarjeta gráfica y afina las líneas del dibujo (inspirado en Anime4K). Útil en capítulos de 480p o 720p. También desde el panel de color o con Shift+E. No se usa en modo rendimiento.</span></div>
+            <select class="sel" id="set-enhance">${Object.entries(ENHANCE_LEVELS).map(([v, l]) => `<option value="${v}" ${(A.settings.enhance || 'off') === v ? 'selected' : ''}>${l ? l.name : 'Apagada'}</option>`).join('')}</select></div>
+        </div>
         <div class="set-card"><h4><svg class="i"><use href="#i-next"/></svg>Capítulos</h4>
+          <div class="set-row"><div class="lbl"><b>Opening y ending</b><span>Usa las marcas de AniSkip (gratis, para anime vinculado a internet) o las que pongas tú con clic derecho sobre el video → «El opening empieza aquí».</span></div>
+            <select class="sel" id="set-skip">${[['button', 'Mostrar botón «Saltar»'], ['auto', 'Saltar automáticamente'], ['off', 'Desactivado']].map(([v, l]) => `<option value="${v}" ${(A.settings.skipMode || 'button') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+          ${rowSwitch('aniskip', 'Buscar marcas en AniSkip', 'Descarga desde internet dónde empiezan y terminan el opening y el ending de cada capítulo.')}
+          ${rowSwitch('prefetch', 'Precargar el siguiente capítulo', 'En el último minuto se deja listo el siguiente para que empiece sin espera.')}
           ${rowSwitch('askResume', 'Preguntar si continuar o empezar de cero', 'Al abrir un capítulo a medias aparece un aviso con «Continuar» y «Desde el inicio». Si no eliges nada en 5 segundos, continúa donde lo dejaste. Apagado: continúa directamente.')}
           ${rowSwitch('autoNext', 'Reproducir el siguiente automáticamente', 'Al terminar un capítulo se muestra una cuenta atrás.')}
           ${rowNum('autoNextDelay', 'Cuenta atrás', 'Segundos antes de pasar al siguiente', 1, 60, 'seg')}
@@ -1336,10 +1973,44 @@ const App = (() => {
     }
     if (tab === 'look') {
       const cats = allCustomCategories();
-      return `<div class="set-card"><h4><svg class="i"><use href="#i-home"/></svg>Secciones del Inicio</h4>
+      const th = A.settings.theme || 'dark';
+      const acc = A.settings.accent || 'violeta';
+      const pct = (k, d) => (A.settings[k] == null ? d : A.settings[k]);
+      return `<div class="set-card"><h4><svg class="i"><use href="#i-color"/></svg>Tema</h4>
+          <div class="theme-pick">${[['dark', 'Oscuro', 'linear-gradient(135deg,#0c1120,#1e1b4b)'], ['oled', 'Negro OLED', '#000'], ['light', 'Claro', 'linear-gradient(135deg,#f5f7fc,#dde3f0)'], ['system', 'Automático', 'linear-gradient(90deg,#0c1120 50%,#eef1f8 50%)']]
+            .map(([k, l, bg]) => `<button class="${th === k ? 'on' : ''}" data-theme="${k}"><span class="sw" style="background:${bg}"></span>${l}</button>`).join('')}</div>
+          <p class="muted small" style="margin:10px 0 0">«Automático» sigue el modo claro u oscuro de Windows.</p>
+        </div>
+        <div class="set-card"><h4><svg class="i"><use href="#i-star"/></svg>Color de acento</h4>
+          <div class="accent-row">${Object.entries(ACCENTS).map(([k, a]) => `<button class="${acc === k ? 'on' : ''}" data-accent="${k}" title="${a.name}" style="background:linear-gradient(135deg,rgb(${a.c[0]}),rgb(${a.c[2]}))"></button>`).join('')}
+            <input type="color" id="accent-custom" value="${/^#/.test(acc) ? acc : '#a855f7'}" title="Elegir otro color"></div>
+          ${rowSwitch('accentFromCover', 'Color según la portada', 'Al abrir una serie o reproducir, el color de acento toma el tono de su portada.', false)}
+        </div>
+        <div class="set-card"><h4><svg class="i"><use href="#i-image"/></svg>Efecto cristal y fondo</h4>
+          <div class="set-row"><div class="lbl"><b>Transparencia de los paneles</b><span>Más bajo = paneles más transparentes; más alto = más sólidos.</span></div>
+            <div class="range-row"><input type="range" min="0" max="100" value="${pct('glassLevel', 50)}" data-set-range="glassLevel"><em>${pct('glassLevel', 50)}%</em></div></div>
+          <div class="set-row"><div class="lbl"><b>Desenfoque del cristal</b><span>0 = sin efecto de vidrio.</span></div>
+            <div class="range-row"><input type="range" min="0" max="100" value="${pct('blurLevel', 50)}" data-set-range="blurLevel"><em>${pct('blurLevel', 50)}%</em></div></div>
+          ${rowSwitch('bgAnim', 'Fondo animado', 'Manchas de color que se mueven lentamente detrás de la interfaz.')}
+          <div class="set-row"><div class="lbl"><b>Imagen de fondo propia</b><span>Una imagen tuya detrás de toda la app (se ve a través del cristal).</span></div>
+            <div class="set-actions" style="margin:0"><button class="btn glass" id="bg-pick"><svg class="i"><use href="#i-image"/></svg>${A.settings.bgImage ? 'Cambiar' : 'Elegir imagen'}</button>${A.settings.bgImage ? '<button class="btn glass danger" id="bg-clear">Quitar</button>' : ''}</div></div>
+          ${A.settings.bgImage ? `<div class="set-row"><div class="lbl"><b>Intensidad de la imagen</b></div><div class="range-row"><input type="range" min="10" max="100" value="${pct('bgOpacity', 45)}" data-set-range="bgOpacity"><em>${pct('bgOpacity', 45)}%</em></div></div>` : ''}
+        </div>
+        <div class="set-card"><h4><svg class="i"><use href="#i-grid"/></svg>Interfaz</h4>
+          <div class="set-row"><div class="lbl"><b>Idioma de la interfaz</b><span>La app se recarga al cambiarlo. En inglés las descripciones se muestran en su idioma original.</span></div>
+            <select class="sel notr" id="set-lang"><option value="es" ${I18N.lang !== 'en' ? 'selected' : ''}>Español</option><option value="en" ${I18N.lang === 'en' ? 'selected' : ''}>English</option></select></div>
+          <div class="set-row"><div class="lbl"><b>Tamaño de la interfaz</b><span>Agranda o achica textos y botones.</span></div>
+            <select class="sel" id="set-zoom">${[[0.85, '85%'], [0.9, '90%'], [1, '100% (normal)'], [1.1, '110%'], [1.25, '125%']].map(([v, l]) => `<option value="${v}" ${(A.settings.uiScale || 1) == v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+          ${rowSwitch('showRail', 'Menú lateral de grupos', 'La barra de la izquierda con tus grupos (Anime, Películas...).')}
+          <div class="set-row"><div class="lbl"><b>Uso de la tarjeta gráfica</b><span>Automático elige según tu equipo (detectado: ${esc(detectGpu().name)} → ${GPU_LABELS[detectGpu().tier]}). Equilibrado conserva el aspecto pero pausa el fondo animado y el efecto cristal mientras ves un video. Ahorro quita el desenfoque y procesa el color sin WebGL, ideal para equipos sin tarjeta gráfica dedicada.</span></div>
+            <select class="sel" id="set-gpu">${[['auto', 'Automático'], ['quality', 'Calidad máxima'], ['balanced', 'Equilibrado'], ['eco', 'Ahorro']].map(([v, l]) => `<option value="${v}" ${(A.settings.gpuMode || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+          ${rowSwitch('perfMode', 'Modo rendimiento', 'Para PCs más lentas: quita el cristal, las animaciones y la luz ambiental.', false)}
+        </div>
+        <div class="set-card"><h4><svg class="i"><use href="#i-home"/></svg>Secciones del Inicio</h4>
           <p>Activa o desactiva lo que se muestra en la pantalla de Inicio.</p>
           ${rowSwitch('dailyReco', 'Recomendación del día', '5 capítulos al azar (cambian cada día) y el botón «Elegir uno al azar».')}
           ${rowSwitch('homeContinue', 'Continuar viendo', 'Series que dejaste a medias.')}
+          ${rowSwitch('homeFav', 'Favoritos', 'Series, películas y videos que marcaste con ♥.')}
           ${rowSwitch('homeNew', 'Capítulos nuevos', 'Capítulos agregados en los últimos 7 días.')}
           ${rowSwitch('homeRecent', 'Agregados recientemente', 'Últimas series agregadas a la biblioteca.')}
         </div>
@@ -1391,7 +2062,7 @@ const App = (() => {
         <h2><svg class="i"><use href="#i-gear"/></svg>Ajustes</h2>
         ${SET_TABS.map((t) => `<button class="set-tab ${t.id === setTab ? 'active' : ''}" data-set-tab="${t.id}"><svg class="i"><use href="#${t.icon}"/></svg>${t.label}${t.id === 'library' ? `<small>${A.rootsInfo.length}</small>` : t.id === 'web' && st.doubt ? `<small style="color:#fde68a">${st.doubt}</small>` : ''}</button>`).join('')}
         <div class="spacer"></div>
-        <div class="nav-ver">Kuro Player v${esc((A.appInfo && A.appInfo.version) || '1.7.1')}</div>
+        <div class="nav-ver">Kuro Player v${esc((A.appInfo && A.appInfo.version) || '2.1.3')}</div>
         <button class="btn primary" data-close>Listo</button>
       </nav>
       <section class="set-main">
@@ -1407,7 +2078,7 @@ const App = (() => {
   function renderRenameList() {
     const box = $('#rename-list');
     if (!box) return;
-    const list = A.series.map((s) => ({ s, r: renameSuggestion(s) })).filter((x) => x.r);
+    const list = A.allSeries.map((s) => ({ s, r: renameSuggestion(s) })).filter((x) => x.r);
     box.innerHTML = list.length ? list.map(({ s, r }) => `<div class="review-item">
         ${s.cover ? `<img src="${esc(s.cover)}" alt="">` : ''}
         <div class="ri-t"><b>${esc(s.folderName)}</b><span>→ ${esc(r.newName)}</span></div>
@@ -1427,7 +2098,8 @@ const App = (() => {
     renderRenameList();
     const box = $('#web-review');
     if (!box) return;
-    const list = A.series.filter((s) => !s.web && (s.webStatus === 'doubt' || s.webStatus === 'none'));
+    const webGroups = new Set(A.groups.filter((g) => g.web).map((g) => g.id));
+    const list = A.allSeries.filter((s) => webGroups.has(s.groupId) && !s.web && (s.webStatus === 'doubt' || s.webStatus === 'none'));
     box.innerHTML = list.length ? list.map((s) => `<div class="review-item">
         ${s.webCandidate && s.webCandidate.image ? `<img src="${esc(s.webCandidate.image)}" alt="">` : ''}
         <div class="ri-t"><b>${esc(s.folderName)}</b><span>${s.webStatus === 'doubt' && s.webCandidate ? `¿${esc(s.webCandidate.title)}${s.webCandidate.year ? ' (' + s.webCandidate.year + ')' : ''}? · ${Math.round(s.webCandidate.confidence * 100)}% parecido` : 'Sin coincidencia con este nombre'}</span></div>
@@ -1441,7 +2113,9 @@ const App = (() => {
     $$('[data-set-bool]').forEach((i) => i.onchange = () => {
       saveSettings({ [i.dataset.setBool]: i.checked });
       if (i.dataset.setBool === 'ambient') Player.refreshGlow();
-      if (['translateSynopsis', 'dailyReco', 'homeContinue', 'homeNew', 'homeRecent'].includes(i.dataset.setBool)) renderAll();
+      if (['bgAnim', 'perfMode', 'showRail', 'accentFromCover'].includes(i.dataset.setBool)) { applyTheme(); renderRail(); }
+      if (i.dataset.setBool === 'perfMode') Player.applyEnhance();
+      if (['translateSynopsis', 'dailyReco', 'homeContinue', 'homeFav', 'homeNew', 'homeRecent'].includes(i.dataset.setBool)) renderAll();
       if (i.dataset.setBool === 'suggestRename') { renderAll(); openSettings(); }
       if (i.dataset.setBool === 'splitSeasons') { window.cinema.setSettings(A.settings).then(() => scan(false)).then(() => openSettings()); }
     });
@@ -1451,15 +2125,25 @@ const App = (() => {
       saveSettings({ [i.dataset.setNum]: v });
     });
     const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
-    on('#set-drop', async () => { await addFolders(); openSettings(); });
+    on('#set-new-group', () => openGroupEditor(null, () => openSettings('library')));
+    $$('[data-g-add]').forEach((b) => b.onclick = async () => { await addFolders(b.dataset.gAdd); openSettings('library'); });
+    $$('[data-g-edit]').forEach((b) => b.onclick = () => openGroupEditor(A.groups.find((g) => g.id === b.dataset.gEdit), () => openSettings('library')));
+    $$('[data-move-root]').forEach((b) => b.onclick = (ev) => {
+      const r = ev.currentTarget.getBoundingClientRect();
+      const p = b.dataset.moveRoot;
+      ctxMenu(r.left - 150, r.bottom + 6, A.groups.map((g) => ({ icon: 'i-g-' + g.icon, label: 'Mover a «' + g.name + '»', action: async () => {
+        const res = await window.cinema.moveRoot(p, g.id); A.groups = res.groups; await scan(true); toast(`Carpeta movida a «${g.name}»`); openSettings('library');
+      } })));
+    });
     on('#set-rescan', async () => { await scan(); openSettings(); });
     on('#set-clear-roots', async () => {
       const n = A.rootsInfo.length;
       const ok = await confirmBox({ title: 'Quitar todas las carpetas', danger: true, ok: `Quitar ${n} carpeta${n === 1 ? '' : 's'}`,
-        html: '<p>La cartelera quedará vacía. <b>Tus videos no se borran</b>, y el progreso y los datos de internet se conservan por si vuelves a agregar las carpetas.</p>' });
+        html: '<p>Se quitan las carpetas de <b>todos los grupos</b> (los grupos se conservan). <b>Tus videos no se borran</b>, y el progreso y los datos de internet se conservan por si vuelves a agregar las carpetas.</p>' });
       if (!ok) return;
       if (Player.state.ep) Player.close();
-      A.roots = await window.cinema.clearRoots();
+      const res = await window.cinema.clearRoots();
+      A.groups = res.groups; A.roots = res.roots;
       while (A.scanning) await new Promise((r) => setTimeout(r, 150));
       await scan(true, { quiet: true });
       toast(`Se quitaron ${n} carpeta${n === 1 ? '' : 's'} (tus archivos no se tocaron)`);
@@ -1477,7 +2161,8 @@ const App = (() => {
       location.reload();
     });
     $$('[data-rm-root]').forEach((b) => b.onclick = async () => {
-      A.roots = await window.cinema.removeRoot(b.dataset.rmRoot);
+      const res = await window.cinema.removeRoot(b.dataset.rmRoot);
+      A.roots = res.roots; A.groups = res.groups;
       await scan(true);
       toast('Carpeta quitada de la cartelera');
       openSettings();
@@ -1494,6 +2179,26 @@ const App = (() => {
     on('#web-clear-all', async () => { await window.cinema.webClearAll(); await scan(true); toast('Datos de internet borrados'); openSettings(); });
     const ts = $('#set-title-src');
     if (ts) ts.onchange = async () => { saveSettings({ titleSource: ts.value }); await scan(true); };
+    $$('[data-theme]').forEach((b) => b.onclick = () => { saveSettings({ theme: b.dataset.theme }); applyTheme(); openSettings('look'); });
+    $$('[data-accent]').forEach((b) => b.onclick = () => { saveSettings({ accent: b.dataset.accent }); applyTheme(); openSettings('look'); });
+    const ac = $('#accent-custom');
+    if (ac) ac.onchange = () => { saveSettings({ accent: ac.value }); applyTheme(); openSettings('look'); };
+    $$('[data-set-range]').forEach((r) => {
+      setRangeFill(r);
+      r.oninput = () => { setRangeFill(r); r.nextElementSibling.textContent = r.value + '%'; saveSettings({ [r.dataset.setRange]: +r.value }); applyTheme(); };
+    });
+    on('#bg-pick', async () => { const url = await window.cinema.pickBackground(); if (url) { saveSettings({ bgImage: url }); applyTheme(); openSettings('look'); } });
+    on('#bg-clear', () => { saveSettings({ bgImage: '' }); applyTheme(); openSettings('look'); });
+    const gp = $('#set-gpu');
+    if (gp) gp.onchange = () => { saveSettings({ gpuMode: gp.value }); applyTheme(); Player.applyGpuMode(); };
+    const lg = $('#set-lang');
+    if (lg) lg.onchange = async () => { await window.cinema.setSettings({ ...A.settings, lang: lg.value }); A.settings.lang = lg.value; I18N.setLang(lg.value); };
+    const en = $('#set-enhance');
+    if (en) en.onchange = () => { saveSettings({ enhance: en.value }); Player.applyEnhance(); };
+    const sk = $('#set-skip');
+    if (sk) sk.onchange = () => saveSettings({ skipMode: sk.value });
+    const zm = $('#set-zoom');
+    if (zm) zm.onchange = () => { saveSettings({ uiScale: +zm.value }); applyTheme(); };
     const lv = $('#set-lview');
     if (lv) lv.onchange = () => { saveSettings({ libraryView: lv.value }); renderLibrary(); };
     $$('[data-cat-view]').forEach((b) => b.onclick = () => { closeModal(); A.genre = b.dataset.catView; A.letter = 'all'; go('library'); });
@@ -1507,7 +2212,7 @@ const App = (() => {
       openSettings('look');
     });
     on('#set-clear-continue', () => {
-      saveSettings({ continueClearedAt: Date.now(), continueHidden: {} });
+      saveSettings({ [pk('continueClearedAt')]: Date.now(), [pk('continueHidden')]: {} });
       renderHome();
       toast('«Continuar viendo» limpiado');
     });
@@ -1523,6 +2228,24 @@ const App = (() => {
       openSettings();
     });
     on('#about-data', () => window.cinema.openDataDir());
+    on('#about-update', () => checkUpdates(true));
+    on('#about-github', () => window.cinema.openUrl('https://github.com/G-726az/KuroPlayer'));
+    on('#about-kofi', () => window.cinema.openUrl('https://ko-fi.com/gls726'));
+    on('#bk-export', async () => {
+      const r = await window.cinema.backupExport();
+      if (r) toast(`Copia guardada: ${r.series} títulos y ${r.covers} portadas`, 4500);
+    });
+    on('#bk-import', async () => {
+      let info;
+      try { info = await window.cinema.backupPick(); } catch (e) { toast(esc(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')), 4500); return; }
+      if (!info) return;
+      const ok = await confirmBox({ title: 'Restaurar copia de seguridad', danger: true, ok: 'Restaurar',
+        html: `<p>Copia del <b>${esc(new Date(info.date).toLocaleString('es'))}</b> (versión ${esc(info.version)}): ${info.groups} grupos, ${info.roots} carpetas, ${info.profiles} perfiles y ${info.series} títulos con datos.</p><p>Se <b>reemplaza</b> lo que tienes ahora en la app. Tus videos no se tocan.</p>` });
+      if (!ok) return;
+      if (Player.state.ep) Player.close();
+      await window.cinema.backupRestore();
+      location.reload();
+    });
     on('#pl-detect', () => confirmDetectPlayers());
     on('#pl-add', async () => {
       const p = await window.cinema.playersPick();
@@ -1541,7 +2264,7 @@ const App = (() => {
     });
     on('#set-clear-thumbs', async () => {
       await window.cinema.clearThumbs();
-      A.series.forEach((x) => x.episodes.forEach((e) => { e.thumb = null; }));
+      A.allSeries.forEach((x) => x.episodes.forEach((e) => { e.thumb = null; }));
       toast('Miniaturas borradas; se regenerarán al navegar');
       renderAll();
     });
@@ -1555,7 +2278,7 @@ const App = (() => {
     const ctx = c.getContext('2d');
     const queue = [];
     const queued = new Set();
-    let busy = false;
+    let busy = false, lastThumb = 0;
     function request(s, ep, priority) {
       if (A.settings.thumbnails === false || ep.thumb || queued.has(ep.id)) return;
       queued.add(ep.id);
@@ -1564,7 +2287,11 @@ const App = (() => {
       pump();
     }
     function pump() {
+      if (!busy && !queue.length) Busy.clear('thumbs');
+      else Busy.set('thumbs', `Generando miniaturas (${queue.length + (busy ? 1 : 0)} pendientes)`);
       if (busy || !queue.length) return;
+      if (Player.state.ep && !Player.video.paused && Date.now() - lastThumb < 1500) { setTimeout(pump, 1500); return; }
+      lastThumb = Date.now();
       // no competir con el reproductor mientras carga
       busy = true;
       const item = queue.shift();
@@ -1612,7 +2339,7 @@ const App = (() => {
     function applyThumb(ep) {
       $$(`[data-thumb="${ep.id}"]`).forEach((el) => { el.style.backgroundImage = cssUrl(ep.thumb); });
       // si la serie no tiene portada, las tarjetas usan la miniatura del primer capítulo
-      const s = A.series.find((x) => x.episodes[0] && x.episodes[0].id === ep.id);
+      const s = A.allSeries.find((x) => x.episodes[0] && x.episodes[0].id === ep.id);
       if (s && !s.cover) $$(`.poster[data-series="${s.id}"] .art`).forEach((art) => {
         const na = art.querySelector('.no-art');
         if (na) na.outerHTML = `<img src="${esc(ep.thumb)}" draggable="false" alt="">`;
@@ -1626,6 +2353,31 @@ const App = (() => {
 
   // ------------------------------------------------------------ eventos globales
   document.addEventListener('click', async (e) => {
+    const rg = e.target.closest('[data-rail-group]');
+    if (rg) { setGroup(rg.dataset.railGroup); return; }
+    if (e.target.closest('[data-rail-new]')) { openGroupEditor(null); return; }
+    const fvs = e.target.closest('[data-fav-s]');
+    if (fvs) { e.stopPropagation(); const s = A.byId.get(fvs.dataset.favS); if (s) toggleFavSeries(s); return; }
+    const fve = e.target.closest('[data-fav-e]');
+    if (fve) {
+      e.stopPropagation();
+      const s = A.byId.get(fve.dataset.sid);
+      const ep = s && s.episodes.find((x) => x.id === fve.dataset.favE);
+      if (ep) toggleFavEp(s, ep);
+      return;
+    }
+    if (e.target.closest('[data-fav-only]')) { A.favOnly = !A.favOnly; renderLibrary(); return; }
+    if (e.target.closest('[data-fav-library]')) { A.favOnly = true; A.letter = 'all'; go('library'); return; }
+    if (e.target.closest('[data-sfav]')) { A.serFav = !A.serFav; renderSeries(); return; }
+    if (e.target.closest('[data-pg-toggle]')) {
+      const groups = (Player.state.series && Player.state.series.groups) || [];
+      const open = A.settings.panelGroupsOpen != null ? A.settings.panelGroupsOpen : groups.length <= 6;
+      saveSettings({ panelGroupsOpen: !open }); renderPanel(false); return;
+    }
+    const sdur = e.target.closest('[data-sdur]');
+    if (sdur) { A.serDur = sdur.dataset.sdur || null; renderSeries(); return; }
+    const dur = e.target.closest('[data-dur]');
+    if (dur) { A.durFilter = dur.dataset.dur || null; renderLibrary(); return; }
     const eye = e.target.closest('[data-eye]');
     if (eye) {
       e.stopPropagation();
@@ -1637,7 +2389,7 @@ const App = (() => {
     const hc = e.target.closest('[data-hide-continue]');
     if (hc) {
       e.stopPropagation();
-      saveSettings({ continueHidden: { ...(A.settings.continueHidden || {}), [hc.dataset.hideContinue]: Date.now() } });
+      saveSettings({ [pk('continueHidden')]: { ...(A.settings[pk('continueHidden')] || {}), [hc.dataset.hideContinue]: Date.now() } });
       renderHome();
       toast('Quitado de «Continuar viendo» (vuelve si sigues viéndolo)');
       return;
@@ -1709,7 +2461,8 @@ const App = (() => {
       const ep = s && s.episodes.find((x) => x.id === pe.dataset.playEp);
       if (ep) {
         if (Player.state.ep && Player.state.ep.id === ep.id) { go('player'); return; }
-        playEpisode(s, ep);
+        const pl = pe.dataset.pl === 'fav' ? favPlaylist() : pe.dataset.pl === 'cur' ? Player.state.playlist : null;
+        playEpisode(s, ep, pl ? { playlist: pl } : undefined);
       }
       return;
     }
@@ -1732,6 +2485,8 @@ const App = (() => {
   });
 
   document.addEventListener('contextmenu', (e) => {
+    const rgm = e.target.closest('[data-rail-group]');
+    if (rgm) { e.preventDefault(); groupMenu(A.groups.find((g) => g.id === rgm.dataset.railGroup), e.clientX, e.clientY); return; }
     const poster = e.target.closest('.poster[data-series], .lcard[data-series]');
     const epEl = e.target.closest('[data-play-ep]');
     if (poster) {
@@ -1746,6 +2501,7 @@ const App = (() => {
         { icon: 'i-image', label: 'Cambiar fondo...', action: () => changeImage(s, 'backdrop') },
         { icon: 'i-edit', label: 'Editar título / sinopsis', action: () => editSeries(s) },
         { icon: 'i-globe', label: s.web ? 'Cambiar datos de internet...' : 'Buscar en internet...', action: () => webPick(s) },
+        { icon: s.fav ? 'i-heart-f' : 'i-heart', label: s.fav ? 'Quitar de favoritos' : 'Agregar a favoritos', action: () => toggleFavSeries(s) },
         { icon: 'i-star', label: 'Agregar a una categoría...', action: () => openCategoryModal([s], 'add') },
         ...(s.hasSubfolders && !s.splitFrom ? [{ icon: 'i-grid', label: 'Separar temporadas en series propias', action: () => setSplit(s.id, true) }] : []),
         ...(s.splitFrom ? [{ icon: 'i-list', label: `Unir temporadas de «${s.splitFrom.name}»`, action: () => setSplit(s.splitFrom.id, false) }] : []),
@@ -1766,6 +2522,7 @@ const App = (() => {
         { icon: 'i-refresh', label: 'Reproducir desde el inicio', action: () => playEpisode(s, ep, { startAt: 0 }) },
         p && p.w ? { icon: 'i-refresh', label: 'Marcar como no visto', action: () => markEpisode(s, ep, false) }
           : { icon: 'i-check', label: 'Marcar como visto', action: () => markEpisode(s, ep, true) },
+        { icon: ep.fav ? 'i-heart-f' : 'i-heart', label: ep.fav ? 'Quitar de favoritos' : 'Agregar a favoritos', action: () => toggleFavEp(s, ep) },
         '-',
         ...openWithItems(ep.path, p && !p.w ? p.t : 0),
         { icon: 'i-folder', label: 'Mostrar en el explorador', action: () => window.cinema.showInFolder(ep.path) },
@@ -1779,9 +2536,11 @@ const App = (() => {
   }, 150));
   $('#ep-filter').addEventListener('input', debounce(() => renderPanel(false), 120));
   $('#btn-add-folder').onclick = addFolders;
-  $('#btn-add-folder-empty').onclick = addFolders;
+  $('#btn-add-folder').onclick = () => addFolders();
+  $('#btn-add-folder-empty').onclick = () => addFolders();
   $('#btn-rescan').onclick = () => scan();
   $('#btn-settings').onclick = () => openSettings();
+  $('#btn-profile').onclick = (ev) => profileMenu(ev);
   $('#ep-panel-close').onclick = () => toggleList(false);
   $('#pl-toggle-list').onclick = () => toggleList();
   $('#now-open-series').onclick = () => { if (Player.state.series) { A.groupFilter = null; go('series', { id: Player.state.series.id }); } };
@@ -1801,14 +2560,14 @@ const App = (() => {
   function reportRoots(res) {
     const name = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
     const msgs = [];
-    if (res.already.length) msgs.push(`«${res.already.map(name).join('», «')}» ya estaba cargada`);
-    if (res.inside.length) msgs.push(`«${res.inside.map((x) => name(x.dir)).join('», «')}» ya está incluida dentro de «${name(res.inside[0].parent)}»`);
+    if (res.already.length) msgs.push(`«${res.already.map(name).join('», «')}» ya estaba cargada${res.alreadyGroup ? ` en el grupo «${res.alreadyGroup}»` : ''}`);
+    if (res.inside.length) msgs.push(`«${res.inside.map((x) => name(x.dir)).join('», «')}» ya está incluida dentro de «${name(res.inside[0].parent)}»${res.inside[0].group ? ` (grupo «${res.inside[0].group}»)` : ''}`);
     if (msgs.length) toast(msgs.join(' · ') + '; se buscaron solo las novedades', 5000);
   }
-  async function addFolders() {
-    const res = await window.cinema.pickRoots();
+  async function addFolders(groupId) {
+    const res = await window.cinema.pickRoots(groupId || A.group);
     if (res.canceled) return;
-    A.roots = res.roots;
+    A.roots = res.roots; A.groups = res.groups;
     reportRoots(res);
     await scan(false);
   }
@@ -1838,8 +2597,8 @@ const App = (() => {
     if (!paths.length) return;
     const subFile = paths.find((p) => /\.(srt|ass|ssa|vtt)$/i.test(p));
     if (subFile && Player.state.ep && paths.length === 1) { toast('Para subtítulos externos usa el menú de subtítulos del reproductor'); return; }
-    const addRes = await window.cinema.addRoots(paths);
-    A.roots = addRes.roots;
+    const addRes = await window.cinema.addRoots(paths, A.group);
+    A.roots = addRes.roots; A.groups = addRes.groups;
     reportRoots(addRes);
     await scan(true);
     const vid = paths.find((p) => /\.(mp4|mkv|webm|m4v|mov|avi|wmv|ts|m2ts|ogv)$/i.test(p));
@@ -1849,7 +2608,7 @@ const App = (() => {
         if (ep) { playEpisode(s, ep); return; }
       }
     }
-    if (addRes.added.length) toast('Carpeta agregada a la cartelera');
+    if (addRes.added.length) toast(`Carpeta agregada a «${esc(curGroup().name)}»`);
     if (!$('#modal').hidden && $('.set-nav')) { openSettings('library'); return; }
     go('library');
   });
@@ -1857,20 +2616,32 @@ const App = (() => {
   window.cinema.onFullscreen(() => {});
   window.cinema.onLibChanged(() => { if (A.settings.autoWatch !== false) scan(true); });
 
+  addEventListener('blur', () => document.body.classList.add('win-inactive'));
+  addEventListener('focus', () => document.body.classList.remove('win-inactive'));
+
   async function init() {
     const lib = await window.cinema.getLibrary();
     A.settings = lib.settings; A.progress = lib.progress || {}; A.roots = lib.roots || []; A.potplayer = lib.potplayer;
+    A.groups = lib.groups || [];
+    A.profiles = lib.profiles || []; A.profile = lib.activeProfile;
+    if ((A.settings.lang || 'es') !== I18N.lang) { I18N.setLang(A.settings.lang || 'es'); return; }
+    I18N.start();
+    renderAvatar();
+    applyTheme();
+    A.group = A.groups.some((g) => g.id === A.settings.activeGroup) ? A.settings.activeGroup : (A.groups[0] && A.groups[0].id);
+    renderRail(); updateGroupChrome();
     Player.init();
     if (A.settings.listOpen === false) toggleList(false); else toggleList(true);
     if (A.settings.theater) toggleTheater(true);
     renderHome();
     await scan(true);
     go('home');
+    if (A.settings.updateCheck !== false) setTimeout(() => checkUpdates(false), 8000);
   }
 
   return {
-    init, go, getProgress, setProgress, saveSettings, onEpisodeChange, onPlayState, onClosed, toggleList, toggleTheater, coverFromFrame,
-    get settings() { return A.settings; }, get potplayer() { return A.potplayer; }, openWithItems, enabledPlayers, get lastBrowseView() { return A.lastBrowseView === 'player' ? 'home' : A.lastBrowseView; },
+    init, go, openSettings, getProgress, setProgress, saveSettings, onEpisodeChange, onPlayState, onClosed, toggleList, toggleTheater, coverFromFrame,
+    get settings() { return A.settings; }, get gpuMode() { return gpuMode(); }, get gpuName() { return detectGpu().name; }, get potplayer() { return A.potplayer; }, openWithItems, enabledPlayers, get lastBrowseView() { return A.lastBrowseView === 'player' ? 'home' : A.lastBrowseView; },
   };
 })();
 

@@ -9,3 +9,4 @@ desktop.ini
 *.log
 .vscode/
 .idea/
+dist-build/

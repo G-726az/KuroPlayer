@@ -41,12 +41,18 @@ let lastScan = [];
 let scanNew = null;
 let lastDiff = null;        // capítulos vistos por primera vez en el escaneo actual
 let watchers = [];
+let backupPending = null;   // copia elegida, a la espera de que el usuario confirme
+let updateFile = null;      // instalador descargado de la versión nueva
 let watchTimer = null;
 const extraAllowed = new Set(); // carpetas abiertas por arrastrar (sesión actual)
 
 const DEFAULT_STORE = () => ({
-  version: 1,
-  roots: [],
+  version: 2,
+  roots: [],       // unión de las carpetas de todos los grupos (se mantiene sincronizada)
+  groups: [],      // [{ id, name, icon, color, type: anime|movies|series|other, web, roots: [] }]
+  profiles: [],    // [{ id, name, color }]
+  activeProfile: null,
+  progressByProfile: {},
   meta: {},        // seriesId -> { title, cover, backdrop, synopsis, color, addedAt }
   seen: {},        // ruta de capítulo -> fecha en que apareció por primera vez
   seenInit: false,
@@ -68,7 +74,44 @@ async function loadStore() {
     store = { ...def, ...raw, settings: { ...def.settings, ...(raw.settings || {}) } };
     if (!store.seen) store.seen = {};
   } catch (e) { store = DEFAULT_STORE(); }
+  migrateGroups();
+  migrateProfiles();
 }
+// progreso por perfil: el progreso anterior pasa al perfil «Principal»
+function migrateProfiles() {
+  if (!Array.isArray(store.profiles) || !store.profiles.length) store.profiles = [{ id: 'p' + crypto.randomBytes(4).toString('hex'), name: 'Principal', color: '#a855f7' }];
+  if (!store.progressByProfile || typeof store.progressByProfile !== 'object') store.progressByProfile = {};
+  if (!store.profiles.some((p) => p.id === store.activeProfile)) store.activeProfile = store.profiles[0].id;
+  const main = store.profiles[0].id;
+  if (!store.progressByProfile[main]) store.progressByProfile[main] = store.progress || {};
+  for (const p of store.profiles) if (!store.progressByProfile[p.id]) store.progressByProfile[p.id] = {};
+  store.progress = store.progressByProfile[store.activeProfile];
+}
+// biblioteca anterior a los grupos: todas sus carpetas pasan a un grupo «Anime»
+const GROUP_TYPES = ['anime', 'movies', 'series', 'other'];
+function newGroupId() { return 'g' + crypto.randomBytes(4).toString('hex'); }
+function migrateGroups() {
+  if (!Array.isArray(store.groups)) store.groups = [];
+  if (!store.groups.length) {
+    store.groups.push({ id: newGroupId(), name: 'Anime', icon: 'anime', color: '#a855f7', type: 'anime', web: true, roots: [...(store.roots || [])] });
+  }
+  for (const g of store.groups) {
+    if (!GROUP_TYPES.includes(g.type)) g.type = 'other';
+    if (!Array.isArray(g.roots)) g.roots = [];
+    if (g.web == null) g.web = g.type !== 'other';
+  }
+  syncRoots();
+}
+// texto en el idioma elegido para la interfaz (diálogos de Windows)
+const L = (es, en) => (store.settings && store.settings.lang === 'en' ? en : es);
+
+function syncRoots() {
+  const all = [];
+  for (const g of store.groups) for (const r of g.roots) if (!all.some((x) => norm(x) === norm(r))) all.push(r);
+  store.roots = all;
+}
+function groupOfRoot(root) { return store.groups.find((g) => g.roots.some((r) => norm(r) === norm(root))) || store.groups[0]; }
+function groupById(id) { return store.groups.find((g) => g.id === id) || store.groups[0]; }
 function saveStoreSoon() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveStoreNow, 600);
@@ -78,7 +121,7 @@ function saveStoreNow() {
   if (!store) return;
   const tmp = STORE_FILE + '.tmp';
   try {
-    fs.writeFileSync(tmp, JSON.stringify(store));
+    fs.writeFileSync(tmp, JSON.stringify({ ...store, progress: undefined }));
     fs.renameSync(tmp, STORE_FILE);
   } catch (e) { console.error('No se pudo guardar la biblioteca', e); }
 }
@@ -204,8 +247,8 @@ async function anyImage(dir) {
   return img ? path.join(dir, img.name) : null;
 }
 
-async function buildSeries(dir, title, videos, root, inherit) {
-  const id = hash(dir);
+async function buildSeries(dir, title, videos, root, inherit, opts = {}) {
+  const id = opts.id || hash(dir);
   const subsIndex = new Map();
   if (!videos) { videos = []; await collectVideos(dir, '', videos, subsIndex, 0); }
   if (!videos.length) return null;
@@ -224,8 +267,10 @@ async function buildSeries(dir, title, videos, root, inherit) {
     const baseNoExt = path.basename(v.name, path.extname(v.name)).toLowerCase();
     const subs = (subsIndex.get(vdir) || []).filter((s) => path.basename(s).toLowerCase().startsWith(baseNoExt))
       .map((s) => ({ path: s, label: path.basename(s).slice(baseNoExt.length).replace(/^[._\s-]+/, '') || path.extname(s).slice(1).toUpperCase() }));
+    const dc = store.durCache && store.durCache[v.full];
     episodes.push({
       id: epId, path: v.full, url: mediaUrl(v.full), name: v.name, title: v.name.replace(/\.[^.]+$/, ''),
+      dur: dc && dc.m === Math.round(st.mtimeMs) ? dc.d : null, fav: !!(store.favEps && store.favEps[v.full]),
       group: v.group, size: st.size, mtime: st.mtimeMs, num: parseEpisodeNumber(v.name),
       thumb: hasThumb ? `cinema://local/thumb/${epId}.jpg?v=${Math.round(fs.statSync(thumbFile).mtimeMs)}` : null,
       subs, ext: path.extname(v.name).slice(1).toLowerCase(), addedAt: store.seen[v.full] || 0,
@@ -233,15 +278,17 @@ async function buildSeries(dir, title, videos, root, inherit) {
   }
   episodes.sort((a, b) => collator.compare(a.group, b.group) || collator.compare(a.name, b.name));
   const meta = store.meta[id] || {};
-  const autoCover = await findImage(dir, COVER_NAMES) || await anyImage(dir);
-  const autoBackdrop = await findImage(dir, BACKDROP_NAMES);
+  // una película suelta usa la imagen con su mismo nombre (Película.jpg) como portada
+  const ownImage = opts.file ? await findImage(dir, [path.basename(opts.file, path.extname(opts.file)).toLowerCase()]) : null;
+  const autoCover = ownImage || (opts.file ? null : await findImage(dir, COVER_NAMES) || await anyImage(dir));
+  const autoBackdrop = opts.file ? null : await findImage(dir, BACKDROP_NAMES);
   const coverPath = meta.cover && fs.existsSync(meta.cover) ? meta.cover : autoCover;
   const backdropPath = meta.backdrop && fs.existsSync(meta.backdrop) ? meta.backdrop : autoBackdrop;
   let st = null; try { st = await fsp.stat(dir); } catch (e) { /* */ }
   const isNewSeries = !store.meta[id] && !inherit;
   if (!store.meta[id]) { store.meta[id] = { addedAt: inherit ? inherit.addedAt : store.seenInit ? Date.now() : 1 }; saveStoreSoon(); }
   return {
-    id, dir, root: root || dir, folderName: title, title: meta.title || title, synopsis: meta.synopsis || '',
+    id, dir, root: root || dir, folderName: title, groupId: opts.groupId || null, kind: opts.kind || 'series', file: opts.file || null, title: meta.title || title, synopsis: meta.synopsis || '',
     web: meta.web || null, webStatus: meta.webStatus || null, webCandidate: meta.webCandidate || null,
     webLocked: !!meta.webLocked, hasFolderCover: !!autoCover, isNewSeries: isNewSeries && store.seenInit,
     keepName: !!meta.keepName, customGenres: Array.isArray(meta.customGenres) ? meta.customGenres : [], splitFrom: inherit ? { id: inherit.id, name: inherit.name } : null,
@@ -249,7 +296,7 @@ async function buildSeries(dir, title, videos, root, inherit) {
     cover: coverPath ? mediaUrl(coverPath, Math.round(safeMtime(coverPath))) : null,
     backdrop: backdropPath ? mediaUrl(backdropPath, Math.round(safeMtime(backdropPath))) : null,
     hasCustomCover: !!(meta.cover && fs.existsSync(meta.cover)),
-    color: meta.color || null,
+    color: meta.color || null, skip: meta.skip || null, fav: !!meta.fav, favAt: meta.favAt || 0,
     addedAt: store.meta[id].addedAt || (st ? st.birthtimeMs : 0),
     episodes,
     groups: [...new Set(episodes.map((e) => e.group))],
@@ -267,7 +314,7 @@ async function splitSeries(dir, name, root, pid, pm) {
   for (const ent of entries) {
     const full = path.join(dir, ent.name);
     if (ent.isDirectory() && !ent.name.startsWith('.')) {
-      const s = await buildSeries(full, ent.name, null, root, inherit);
+      const s = await buildSeries(full, ent.name, null, root, inherit, { groupId: pm.groupId });
       if (s) {
         // subcarpetas genéricas ("Temporada 1", "Season 2", "S2", "Parte 1") llevan el nombre de la serie madre
         if (/^(temporada|season|parte|part|cour|s|t)\s*[-_.]?\s*\d{1,2}$/i.test(ent.name.trim())) {
@@ -282,19 +329,22 @@ async function splitSeries(dir, name, root, pid, pm) {
   }
   if (!out.length) return [];
   if (loose.length) {
-    const s = await buildSeries(dir, name, loose, root, inherit);
+    const s = await buildSeries(dir, name, loose, root, inherit, { groupId: pm.groupId });
     if (s) out.push(s);
   }
   out.forEach((s) => { s.split = true; });
   return out;
 }
 
+function cleanMovieTitle(file) {
+  return path.basename(file, path.extname(file)).replace(/[._]+/g, ' ').replace(/\s*\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
+}
 async function scanLibrary() {
   scanNew = [];
   const result = [];
   const seen = new Set();
-  const roots = [...store.roots, ...[...extraAllowed].filter((r) => !store.roots.some((x) => norm(x) === r))];
-  for (const root of roots) {
+  for (const g of store.groups) for (const root of g.roots) {
+    const gopts = { groupId: g.id, kind: g.type === 'movies' ? 'movie' : 'series' };
     const entries = await readDirSafe(root);
     const loose = [];
     for (const ent of entries) {
@@ -304,20 +354,28 @@ async function scanLibrary() {
         seen.add(norm(full));
         const pid = hash(full);
         const pm = store.meta[pid] || {};
-        const split = pm.split != null ? !!pm.split : !!store.settings.splitSeasons;
+        const split = g.type !== 'movies' && (pm.split != null ? !!pm.split : !!store.settings.splitSeasons);
         if (split) {
-          const kids = await splitSeries(full, ent.name, root, pid, pm);
+          const kids = await splitSeries(full, ent.name, root, pid, { ...pm, groupId: g.id });
           if (kids.length) { result.push(...kids); continue; }
         }
-        const s = await buildSeries(full, ent.name, null, root);
+        const s = await buildSeries(full, ent.name, null, root, null, gopts);
         if (s) { s.hasSubfolders = s.groups.filter(Boolean).length > 0 && s.groups.length > 1; result.push(s); }
       } else if (ent.isFile() && VIDEO_EXT.has(path.extname(ent.name).toLowerCase())) {
         loose.push({ full, name: ent.name, group: '' });
       }
     }
-    if (loose.length && !seen.has(norm(root))) {
+    if (loose.length && g.type === 'movies') {
+      // en un grupo de películas cada video suelto es una película propia
+      for (const v of loose) {
+        if (seen.has(norm(v.full))) continue;
+        seen.add(norm(v.full));
+        const s = await buildSeries(root, cleanMovieTitle(v.name), [v], root, null, { ...gopts, id: hash(v.full), file: v.full });
+        if (s) result.push(s);
+      }
+    } else if (loose.length && !seen.has(norm(root))) {
       seen.add(norm(root));
-      const s = await buildSeries(root, path.basename(root) || root, loose, root);
+      const s = await buildSeries(root, path.basename(root) || root, loose, root, null, gopts);
       if (s) result.push(s);
     }
   }
@@ -383,9 +441,10 @@ const Meta = {
     const anilist = url.includes('anilist');
     for (let i = 0; i < tries; i++) {
       const kitsu = url.includes('kitsu');
-      await this.throttle(anilist ? 'anilist' : kitsu ? 'kitsu' : 'jikan', anilist ? 2100 : kitsu ? 500 : 1100);
+      const key = anilist ? 'anilist' : kitsu ? 'kitsu' : url.includes('tvmaze') ? 'tvmaze' : url.includes('wikipedia') ? 'wiki' : 'jikan';
+      await this.throttle(key, { anilist: 2100, kitsu: 500, tvmaze: 550, wiki: 120, jikan: 1100 }[key]);
       let res;
-      try { res = await net.fetch(url, { ...(init || {}), headers: { 'User-Agent': 'KuroPlayer/1.7', Accept: url.includes('kitsu') ? 'application/vnd.api+json' : 'application/json', ...((init && init.headers) || {}) } }); }
+      try { res = await net.fetch(url, { ...(init || {}), headers: { 'User-Agent': 'KuroPlayer/2.0 (https://github.com/G-726az/KuroPlayer)', Accept: url.includes('kitsu') ? 'application/vnd.api+json' : 'application/json', ...((init && init.headers) || {}) } }); }
       catch (e) { if (i === tries - 1) throw new Error('Sin conexión a internet'); await new Promise((r) => setTimeout(r, 1500)); continue; }
       if (res.status === 429 || res.status >= 500) { await new Promise((r) => setTimeout(r, 2500 * (i + 1))); continue; }
       if (!res.ok) throw new Error('El servicio respondió HTTP ' + res.status);
@@ -517,14 +576,107 @@ const Meta = {
     });
     return (((data.data || {}).Page || {}).media || []).map((m) => this.fromAniList(m));
   },
+  // ---- series de TV (no anime): TVmaze, gratis y sin cuenta
+  fromTvmaze(sh) {
+    const strip = (h) => String(h || '').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
+    const genres = sh.genres || [];
+    return {
+      source: 'TVmaze', id: sh.id, url: sh.url, title: sh.name || '', titleEn: '', titleJp: '', synonyms: [],
+      type: 'TV', typeEs: sh.type === 'Animation' ? 'Animación' : sh.type === 'Documentary' ? 'Documental' : 'Serie TV',
+      episodes: null, status: sh.status || '', year: sh.premiered ? +String(sh.premiered).slice(0, 4) : null,
+      score: sh.rating && sh.rating.average ? sh.rating.average : null, rating: '',
+      synopsis: strip(sh.summary), genres, genresEs: genres.map((g) => GENRES_ES[g] || g),
+      studios: [(sh.network && sh.network.name) || (sh.webChannel && sh.webChannel.name)].filter(Boolean),
+      image: (sh.image && (sh.image.original || sh.image.medium)) || '', banner: '',
+    };
+  },
+  async searchTvmaze(q) {
+    const data = await this.getJson('https://api.tvmaze.com/search/shows?q=' + encodeURIComponent(q.slice(0, 100)));
+    return (data || []).slice(0, 8).map((x) => this.fromTvmaze(x.show));
+  },
+  // ---- películas y lo que no esté en las otras fuentes: Wikipedia (español e inglés)
+  fromWiki(sum, lang, kind) {
+    const desc = `${sum.description || ''} ${sum.extract || ''}`;
+    const y = /\b(19[0-9]{2}|20[0-9]{2})\b/.exec(desc);
+    const title = String(sum.title || '').replace(/\s*\((película|film|pel[íi]cula de \d{4}|\d{4} film|serie de televisión|serie|TV series|miniserie|anime)[^)]*\)\s*$/i, '');
+    const img = (sum.originalimage && sum.originalimage.source) || (sum.thumbnail && sum.thumbnail.source) || '';
+    return {
+      source: 'Wikipedia', id: `${lang}:${sum.title}`, url: (sum.content_urls && sum.content_urls.desktop && sum.content_urls.desktop.page) || '',
+      title, titleEn: lang === 'en' ? title : '', titleJp: '', synonyms: [sum.title].filter((t) => t !== title),
+      type: kind === 'movie' ? 'Movie' : 'TV', typeEs: kind === 'movie' ? 'Película' : 'Serie', episodes: null, status: '',
+      year: y ? +y[1] : null, score: null, rating: '', synopsis: sum.extract || '', synopsisEs: lang === 'es' ? (sum.extract || '') : undefined,
+      genres: [], genresEs: [], studios: [], image: /\.(svg)(\?|$)/i.test(img) ? '' : img, banner: '',
+    };
+  },
+  async wikiSummary(lang, title) {
+    return this.getJson(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(String(title).replace(/ /g, '_'))}`, 2);
+  },
+  async searchWiki(q, kind, lang) {
+    const hint = kind === 'movie' ? (lang === 'es' ? ' película' : ' film') : (lang === 'es' ? ' serie' : ' TV series');
+    const d = await this.getJson(`https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srlimit=5&format=json&srsearch=${encodeURIComponent(q.slice(0, 90) + hint)}`, 2);
+    const out = [];
+    for (const r of ((d.query && d.query.search) || []).slice(0, 4)) {
+      try {
+        const sum = await this.wikiSummary(lang, r.title);
+        if (!sum || sum.type === 'disambiguation') continue;
+        const c = this.fromWiki(sum, lang, kind);
+        // los pósters de películas suelen estar solo en la Wikipedia en inglés
+        if (!c.image && lang !== 'en' && out.length < 2) {
+          try {
+            const ll = await this.getJson(`https://${lang}.wikipedia.org/w/api.php?action=query&prop=langlinks&lllang=en&format=json&titles=${encodeURIComponent(r.title)}`, 1);
+            const pg = Object.values((ll.query && ll.query.pages) || {})[0];
+            const en = pg && pg.langlinks && pg.langlinks[0] && pg.langlinks[0]['*'];
+            if (en) {
+              const es = await this.wikiSummary('en', en);
+              const img = (es.originalimage && es.originalimage.source) || (es.thumbnail && es.thumbnail.source) || '';
+              if (img && !/\.svg(\?|$)/i.test(img)) c.image = img;
+              if (!c.titleEn) c.titleEn = en.replace(/\s*\([^)]*\)\s*$/, '');
+            }
+          } catch (e) { /* sin póster */ }
+        }
+        out.push(c);
+      } catch (e) { /* sigue */ }
+    }
+    return out;
+  },
+  // ---- vincular pegando el enlace de la página (AniList, MyAnimeList, Kitsu, TVmaze o Wikipedia)
+  async fromUrl(url) {
+    const u = String(url || '').trim();
+    let m;
+    if ((m = /anilist\.co\/anime\/(\d+)/i.exec(u)) || (m = /myanimelist\.net\/anime\/(\d+)/i.exec(u))) {
+      const field = /anilist/i.test(u) ? 'id' : 'idMal';
+      const query = `query($i:Int){Media(${field}:$i,type:ANIME){id idMal title{romaji english native} synonyms startDate{year} seasonYear episodes format status averageScore genres tags{name rank isMediaSpoiler isGeneralSpoiler} studios(isMain:true){nodes{name}} coverImage{extraLarge large} bannerImage siteUrl isAdult description(asHtml:false)}}`;
+      try {
+        const d = await this.getJson('https://graphql.anilist.co', 3, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables: { i: +m[1] } }) });
+        if (d.data && d.data.Media) return this.fromAniList(d.data.Media);
+      } catch (e) { if (field === 'id') throw e; }
+      const j = await this.getJson('https://api.jikan.moe/v4/anime/' + m[1]);
+      return this.fromJikan(j.data);
+    }
+    if ((m = /kitsu\.(?:io|app)\/anime\/([^/?#]+)/i.exec(u))) {
+      const d = await this.getJson('https://kitsu.io/api/edge/anime?filter[slug]=' + encodeURIComponent(m[1]));
+      if (d.data && d.data[0]) return this.fromKitsu(d.data[0]);
+      const d2 = await this.getJson('https://kitsu.io/api/edge/anime/' + encodeURIComponent(m[1]));
+      return this.fromKitsu(d2.data);
+    }
+    if ((m = /tvmaze\.com\/shows\/(\d+)/i.exec(u))) return this.fromTvmaze(await this.getJson('https://api.tvmaze.com/shows/' + m[1]));
+    if ((m = /(\w+)\.(?:m\.)?wikipedia\.org\/wiki\/([^?#]+)/i.exec(u))) {
+      const sum = await this.wikiSummary(m[1], decodeURIComponent(m[2]));
+      return this.fromWiki(sum, m[1], /film|película/i.test(sum.description || '') ? 'movie' : 'series');
+    }
+    throw new Error('Enlace no reconocido. Usa uno de AniList, MyAnimeList, Kitsu, TVmaze o Wikipedia.');
+  },
   async searchJikan(q) {
     const data = await this.getJson('https://api.jikan.moe/v4/anime?limit=10&q=' + encodeURIComponent(q.slice(0, 100)));
     return (data.data || []).map((a) => this.fromJikan(a));
   },
   // búsqueda en varias etapas; se detiene en cuanto hay una coincidencia clara
   async search(folderName, opts = {}) {
+    const yearHint = (/\b(19[0-9]{2}|20[0-9]{2})\b/.exec(String(folderName)) || [])[1];
     const { query } = this.parseFolder(folderName);
     const q = query || String(folderName);
+    const type = opts.type || 'anime';
+    if (type === 'movies' || type === 'series') return this.searchGeneric(q, type === 'movies' ? 'movie' : 'series', yearHint, opts);
     const pool = new Map();
     const add = (list) => {
       for (const c of list) {
@@ -590,7 +742,30 @@ const Meta = {
       words.slice().sort((a, b) => b.length - a.length).slice(0, 2).forEach((w) => tries.push(w));
       for (const t of tries) { if (best() >= GOOD) break; await anilist(t, 0.88); }
     }
+    // 5) último recurso: TVmaze (tiene muchos anime con otro nombre) y, en búsqueda manual, Wikipedia
+    if (best() < 0.6 && !opts.quick) {
+      try { add(await this.searchTvmaze(q)); } catch (e) { /* sin respaldo */ }
+      if (opts.manual && best() < 0.6) { try { add(await this.searchWiki(q, 'series', 'en')); } catch (e) { /* */ } }
+    }
     return [...pool.values()].sort((a, b) => b.confidence - a.confidence || (a.source === 'Kitsu') - (b.source === 'Kitsu')).slice(0, 12);
+  },
+  async searchGeneric(q, kind, yearHint, opts = {}) {
+    const pool = new Map();
+    const add = (list) => {
+      for (const c of list) {
+        const k = c.source + ':' + c.id;
+        if (pool.has(k)) continue;
+        c.confidence = this.confidence(q, c);
+        if (yearHint && c.year) c.confidence = Math.round(Math.max(0, Math.min(1, c.confidence + (String(c.year) === yearHint ? 0.12 : -0.15))) * 100) / 100;
+        pool.set(k, c);
+      }
+    };
+    const best = () => Math.max(0, ...[...pool.values()].map((c) => c.confidence));
+    const safe = async (fn) => { try { add(await fn()); } catch (e) { if (/conexión/i.test(e.message)) throw e; } };
+    if (kind === 'series') await safe(() => this.searchTvmaze(q));
+    if (best() < 0.86) await safe(() => this.searchWiki(q, kind, 'es'));
+    if (best() < 0.86 && !opts.quick) await safe(() => this.searchWiki(q, kind, 'en'));
+    return [...pool.values()].sort((a, b) => b.confidence - a.confidence).slice(0, 12);
   },
   async translate(text) {
     if (!text) return text;
@@ -620,7 +795,7 @@ const Meta = {
   async applyToSeries(seriesId, cand, opts) {
     const m = store.meta[seriesId] || {};
     const web = { ...cand, fetchedAt: Date.now() };
-    if (opts.translate !== false && web.synopsis) {
+    if (opts.translate !== false && web.synopsis && !web.synopsisEs) {
       try { web.synopsisEs = await this.translate(web.synopsis); } catch (e) { /* se queda en inglés */ }
     }
     const unknown = (web.genres || []).filter((g) => !GENRES_ES[g]);
@@ -669,6 +844,9 @@ const Meta = {
     const all = lastScan.length ? lastScan : await scanLibrary();
     const list = all.filter((s) => {
       const m = store.meta[s.id] || {};
+      const g = groupById(s.groupId);
+      if (!g || !g.web) return false;           // el grupo no usa internet
+      if (opts.groupId && s.groupId !== opts.groupId) return false;
       if (m.webLocked) return false; // las elecciones manuales no se pisan
       return opts.onlyMissing === false ? true : !m.web;
     });
@@ -679,7 +857,7 @@ const Meta = {
       const s = list[i];
       send({ done: i, title: s.folderName, ...res });
       try {
-        const cands = await this.search(s.searchName || s.folderName);
+        const cands = await this.search(s.searchName || s.folderName, { type: groupById(s.groupId).type });
         const best = cands[0];
         const m = store.meta[s.id] || {};
         if (best && best.confidence >= (opts.threshold || 0.8)) {
@@ -727,11 +905,13 @@ async function renameSeriesFolder(id, newName) {
   const newId = hash(newDir);
   if (store.meta[id]) { store.meta[newId] = { ...store.meta[id] }; delete store.meta[id]; }
   const oldPrefix = norm(s.dir) + path.sep;
-  for (const k of Object.keys(store.progress)) {
-    if (norm(k).startsWith(oldPrefix)) {
-      const nk = newDir + k.slice(s.dir.length);
-      store.progress[nk] = { ...store.progress[k], s: newId };
-      delete store.progress[k];
+  for (const prog of Object.values(store.progressByProfile)) {
+    for (const k of Object.keys(prog)) {
+      if (norm(k).startsWith(oldPrefix)) {
+        const nk = newDir + k.slice(s.dir.length);
+        prog[nk] = { ...prog[k], s: newId };
+        delete prog[k];
+      }
     }
   }
   for (const k of Object.keys(store.seen || {})) {
@@ -978,7 +1158,13 @@ const MediaEngine = (() => {
     return versionCache;
   }
   async function encoderName() { return available() ? (await pickEncoder()).name : null; }
-  return { available, probe, prepareStream, serve, stop, subtitle, thumb, version, encoderName };
+  async function duration(file) {
+    if (!available()) return null;
+    const r = await run(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], 15000);
+    const d = parseFloat(r.stdout.toString());
+    return isFinite(d) && d > 0 ? Math.round(d * 10) / 10 : null;
+  }
+  return { available, probe, prepareStream, serve, stop, subtitle, thumb, version, encoderName, duration };
 })();
 
 // ---------------------------------------------------------------- IPC
@@ -1078,10 +1264,40 @@ function setupIpc() {
   ipcMain.handle('media:sub', async (e, p, index, codec) => { if (!isAllowed(p)) throw new Error('Sin acceso'); return MediaEngine.subtitle(p, index, codec); });
   ipcMain.handle('media:thumb', async (e, p, id) => (isAllowed(p) && /^[a-f0-9]{16}$/.test(id) ? MediaEngine.thumb(p, id) : null));
   ipcMain.handle('media:available', () => MediaEngine.available());
+  // duraciones de varios videos (para el filtro por duración); se guardan en caché por fecha de modificación
+  ipcMain.handle('media:durations', async (e, paths) => {
+    if (!store.durCache) store.durCache = {};
+    const out = {};
+    const todo = [];
+    for (const p of (Array.isArray(paths) ? paths : []).slice(0, 400)) {
+      if (!isAllowed(p)) continue;
+      let st; try { st = fs.statSync(p); } catch (err) { continue; }
+      const m = Math.round(st.mtimeMs), c = store.durCache[p];
+      if (c && c.m === m) out[p] = c.d; else todo.push([p, m]);
+    }
+    let i = 0;
+    const worker = async () => {
+      while (i < todo.length) {
+        const [p, m] = todo[i++];
+        const d = await MediaEngine.duration(p);
+        if (d != null) { store.durCache[p] = { m, d }; out[p] = d; }
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    if (todo.length) saveStoreSoon();
+    return out;
+  });
+  ipcMain.handle('fav:ep', (e, p, on) => {
+    if (typeof p !== 'string' || !isAllowed(p)) return false;
+    if (!store.favEps) store.favEps = {};
+    if (on) store.favEps[p] = Date.now(); else delete store.favEps[p];
+    saveStoreSoon();
+    return true;
+  });
   ipcMain.handle('players:detect', () => detectPlayers());
   ipcMain.handle('players:open', (e, id, file, seconds) => openWithPlayer(id, file, seconds));
   ipcMain.handle('players:pick', async () => {
-    const r = await dialog.showOpenDialog(win, { title: 'Elegir un reproductor de video', properties: ['openFile'], filters: [{ name: 'Programa', extensions: ['exe'] }] });
+    const r = await dialog.showOpenDialog(win, { title: L('Elegir un reproductor de video', 'Choose a video player'), properties: ['openFile'], filters: [{ name: L('Programa', 'Program'), extensions: ['exe'] }] });
     if (r.canceled || !r.filePaths[0]) return null;
     const p = r.filePaths[0];
     return { id: 'custom-' + hash(p).slice(0, 8), name: path.basename(p, path.extname(p)), path: p, custom: true };
@@ -1095,48 +1311,69 @@ function setupIpc() {
   }));
   ipcMain.handle('app:openDataDir', () => shell.openPath(DATA_DIR));
   ipcMain.handle('lib:get', () => ({
-    roots: store.roots, settings: store.settings, progress: store.progress,
+    roots: store.roots, groups: store.groups, settings: store.settings, progress: store.progress,
+    profiles: store.profiles, activeProfile: store.activeProfile,
     potplayer: findPotPlayer(), dataDir: DATA_DIR,
   }));
   ipcMain.handle('lib:scan', async () => { const series = await scanLibrary(); setupWatchers(); return { series, diff: lastDiff }; });
 
-  // clasifica una carpeta: nueva, ya cargada, o dentro de una ya cargada
-  function addRootPath(dir, result) {
+  // clasifica una carpeta: nueva, ya cargada (en cualquier grupo), o dentro de una ya cargada
+  function addRootPath(dir, result, groupId) {
     const n = norm(dir);
     const same = store.roots.find((x) => norm(x) === n);
-    if (same) { result.already.push(dir); return; }
+    if (same) { result.already.push(dir); result.alreadyGroup = groupOfRoot(same).name; return; }
     const parent = store.roots.find((x) => n.startsWith(norm(x) + path.sep));
-    if (parent) { result.inside.push({ dir, parent }); return; }
-    store.roots.push(dir);
+    if (parent) { result.inside.push({ dir, parent, group: groupOfRoot(parent).name }); return; }
+    // si la carpeta nueva contiene carpetas ya cargadas, esas quedan incluidas en ella
+    for (const g of store.groups) g.roots = g.roots.filter((x) => !norm(x).startsWith(n + path.sep));
+    groupById(groupId).roots.push(dir);
+    syncRoots();
     result.added.push(dir);
   }
-  ipcMain.handle('roots:pick', async () => {
-    const res = { roots: store.roots, added: [], already: [], inside: [], canceled: false };
-    const r = await dialog.showOpenDialog(win, { title: 'Elegir carpeta de videos / anime', properties: ['openDirectory', 'multiSelections'] });
+  const rootsResult = () => ({ roots: store.roots, groups: store.groups });
+  ipcMain.handle('roots:pick', async (e, groupId) => {
+    const res = { ...rootsResult(), added: [], already: [], inside: [], canceled: false };
+    const g = groupById(groupId);
+    const r = await dialog.showOpenDialog(win, { title: L(`Agregar carpetas a «${g.name}»`, `Add folders to «${g.name}»`), properties: ['openDirectory', 'multiSelections'] });
     if (r.canceled) { res.canceled = true; return res; }
-    for (const p of r.filePaths) addRootPath(p, res);
+    for (const p of r.filePaths) addRootPath(p, res, g.id);
     saveStoreSoon();
-    res.roots = store.roots;
-    return res;
+    return { ...res, ...rootsResult() };
   });
-  ipcMain.handle('roots:add', (e, paths) => {
-    const res = { roots: store.roots, added: [], already: [], inside: [] };
+  ipcMain.handle('roots:add', (e, paths, groupId) => {
+    const res = { added: [], already: [], inside: [] };
     for (const p of paths || []) {
       try {
         const st = fs.statSync(p);
-        addRootPath(st.isDirectory() ? p : path.dirname(p), res);
+        addRootPath(st.isDirectory() ? p : path.dirname(p), res, groupId);
       } catch (err) { /* */ }
     }
     saveStoreSoon();
-    res.roots = store.roots;
-    return res;
+    return { ...res, ...rootsResult() };
   });
-  ipcMain.handle('roots:clear', () => {
-    store.roots = [];
-    extraAllowed.clear();          // también las carpetas abiertas arrastrándolas
+  // sin grupo: se quitan las carpetas de todos los grupos
+  ipcMain.handle('roots:clear', (e, groupId) => {
+    for (const g of store.groups) if (!groupId || g.id === groupId) g.roots = [];
+    syncRoots();
+    extraAllowed.clear();
     saveStoreNow();
     setupWatchers();
-    return store.roots;
+    return rootsResult();
+  });
+  ipcMain.handle('groups:save', (e, list) => {
+    const clean = (Array.isArray(list) ? list : []).map((g) => ({
+      id: /^g[0-9a-f]{4,}$/.test(String(g.id)) ? g.id : newGroupId(),
+      name: String(g.name || 'Grupo').trim().slice(0, 40) || 'Grupo',
+      icon: String(g.icon || 'folder').slice(0, 20), color: /^#[0-9a-f]{6}$/i.test(g.color) ? g.color : '#a855f7',
+      type: GROUP_TYPES.includes(g.type) ? g.type : 'other', web: !!g.web,
+      roots: (store.groups.find((x) => x.id === g.id) || { roots: [] }).roots,
+    }));
+    if (!clean.length) return rootsResult();
+    store.groups = clean;
+    syncRoots();
+    saveStoreSoon();
+    setupWatchers();
+    return rootsResult();
   });
   // deja la app como recién instalada: biblioteca, progreso, ajustes, portadas, miniaturas y caché
   ipcMain.handle('app:factoryReset', async () => {
@@ -1148,6 +1385,8 @@ function setupIpc() {
       await fsp.mkdir(dir, { recursive: true });
     }
     store = DEFAULT_STORE();
+    migrateGroups();
+    migrateProfiles();
     saveStoreNow();
     setupWatchers();
     if (win) {
@@ -1156,9 +1395,9 @@ function setupIpc() {
     }
     return true;
   });
-  ipcMain.handle('roots:info', () => store.roots.map((r) => ({ path: r, exists: fs.existsSync(r) })));
+  ipcMain.handle('roots:info', () => store.groups.flatMap((g) => g.roots.map((r) => ({ path: r, exists: fs.existsSync(r), groupId: g.id }))));
   ipcMain.handle('shell:openWeb', (e, url) => {
-    if (/^https:\/\/(myanimelist\.net|anilist\.co)\//.test(String(url))) shell.openExternal(url);
+    if (/^https:\/\/((www\.)?myanimelist\.net|anilist\.co|kitsu\.(io|app)|www\.tvmaze\.com|\w+\.wikipedia\.org|www\.google\.com\/search|github\.com\/G-726az\/KuroPlayer|ko-fi\.com)\b/.test(String(url))) shell.openExternal(url);
   });
   const clearWeb = (m) => {
     if (m.cover && m.coverFromWeb && m.cover.startsWith(COVER_DIR)) { fsp.unlink(m.cover).catch(() => {}); delete m.cover; }
@@ -1166,7 +1405,8 @@ function setupIpc() {
     delete m.backdropFromWeb;
     delete m.web; delete m.webStatus; delete m.webCandidate; delete m.webLocked; delete m.coverFromWeb;
   };
-  ipcMain.handle('web:search', (e, query) => Meta.search(query));
+  ipcMain.handle('web:search', (e, query, type) => Meta.search(query, { type, manual: true }));
+  ipcMain.handle('web:fromUrl', async (e, url) => { const c = await Meta.fromUrl(url); c.confidence = 1; return c; });
   ipcMain.handle('web:parseFolder', (e, name) => Meta.parseFolder(name));
   ipcMain.handle('series:rename', (e, id, name) => renameSeriesFolder(id, name));
   ipcMain.handle('series:setSplit', (e, parentId, split) => {
@@ -1180,9 +1420,18 @@ function setupIpc() {
   ipcMain.handle('web:fetchAll', (e, opts) => Meta.fetchAll(opts || {}));
   ipcMain.handle('web:cancel', () => { Meta.cancel = true; return true; });
   ipcMain.handle('roots:remove', (e, p) => {
-    store.roots = store.roots.filter((x) => norm(x) !== norm(p));
+    for (const g of store.groups) g.roots = g.roots.filter((x) => norm(x) !== norm(p));
+    syncRoots();
     saveStoreSoon();
-    return store.roots;
+    setupWatchers();
+    return rootsResult();
+  });
+  ipcMain.handle('roots:move', (e, p, groupId) => {
+    for (const g of store.groups) g.roots = g.roots.filter((x) => norm(x) !== norm(p));
+    groupById(groupId).roots.push(p);
+    syncRoots();
+    saveStoreSoon();
+    return rootsResult();
   });
 
   ipcMain.handle('meta:set', (e, id, patch) => {
@@ -1193,7 +1442,7 @@ function setupIpc() {
   ipcMain.handle('image:pick', async (e, seriesId, kind) => {
     const r = await dialog.showOpenDialog(win, {
       title: kind === 'backdrop' ? 'Elegir imagen de fondo' : 'Elegir portada',
-      properties: ['openFile'], filters: [{ name: 'Imágenes', extensions: [...IMAGE_EXT].map((x) => x.slice(1)) }],
+      properties: ['openFile'], filters: [{ name: L('Imágenes', 'Images'), extensions: [...IMAGE_EXT].map((x) => x.slice(1)) }],
     });
     if (r.canceled || !r.filePaths[0]) return null;
     const src = r.filePaths[0];
@@ -1264,7 +1513,7 @@ function setupIpc() {
     return txt.replace(/^\uFEFF/, '');
   });
   ipcMain.handle('sub:pick', async () => {
-    const r = await dialog.showOpenDialog(win, { title: 'Cargar subtítulos', properties: ['openFile'], filters: [{ name: 'Subtítulos', extensions: ['srt', 'vtt', 'ass', 'ssa'] }] });
+    const r = await dialog.showOpenDialog(win, { title: L('Cargar subtítulos', 'Load subtitles'), properties: ['openFile'], filters: [{ name: L('Subtítulos', 'Subtitles'), extensions: ['srt', 'vtt', 'ass', 'ssa'] }] });
     if (r.canceled || !r.filePaths[0]) return null;
     extraAllowed.add(norm(path.dirname(r.filePaths[0])));
     return r.filePaths[0];
@@ -1281,7 +1530,7 @@ function setupIpc() {
     return true;
   });
   ipcMain.handle('potplayer:pick', async () => {
-    const r = await dialog.showOpenDialog(win, { title: 'Ubicar PotPlayer', properties: ['openFile'], filters: [{ name: 'Programa', extensions: ['exe'] }] });
+    const r = await dialog.showOpenDialog(win, { title: L('Ubicar PotPlayer', 'Locate PotPlayer'), properties: ['openFile'], filters: [{ name: L('Programa', 'Program'), extensions: ['exe'] }] });
     if (r.canceled || !r.filePaths[0]) return findPotPlayer();
     store.settings.potplayer = r.filePaths[0];
     saveStoreSoon();
@@ -1297,6 +1546,142 @@ function setupIpc() {
     return f;
   });
 
+  // marcas de opening/ending de AniSkip (gratis, sin cuenta), guardadas 7 días
+  ipcMain.handle('skip:get', async (e, malId, ep, dur) => {
+    if (!malId || !ep) return [];
+    store.skipCache = store.skipCache || {};
+    const key = `${malId}:${ep}`;
+    const hit = store.skipCache[key];
+    if (hit && Date.now() - hit.ts < 7 * 86400000) return hit.list;
+    try {
+      const url = `https://api.aniskip.com/v2/skip-times/${malId}/${ep}?types[]=op&types[]=ed&types[]=mixed-op&types[]=mixed-ed&types[]=recap&episodeLength=0`;
+      const res = await net.fetch(url, { headers: { 'User-Agent': 'KuroPlayer/2.0 (https://github.com/G-726az/KuroPlayer)' } });
+      const j = res.ok ? await res.json() : { found: false, results: [] };
+      const list = (j.results || []).map((r) => ({ type: r.skipType, start: r.interval.startTime, end: r.interval.endTime, len: r.episodeLength || 0 }));
+      store.skipCache[key] = { ts: Date.now(), list };
+      saveStoreSoon();
+      return list;
+    } catch (err) { return hit ? hit.list : []; }
+  });
+  // ---------------- perfiles
+  ipcMain.handle('profiles:save', (e, list) => {
+    const clean = (Array.isArray(list) ? list : []).slice(0, 12).map((p) => ({
+      id: /^p[0-9a-f]{4,}$/.test(String(p.id)) ? p.id : 'p' + crypto.randomBytes(4).toString('hex'),
+      name: String(p.name || 'Perfil').trim().slice(0, 24) || 'Perfil', color: /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : '#a855f7',
+    }));
+    if (!clean.length) return { profiles: store.profiles, activeProfile: store.activeProfile };
+    for (const id of Object.keys(store.progressByProfile)) if (!clean.some((p) => p.id === id)) delete store.progressByProfile[id];
+    store.profiles = clean;
+    migrateProfiles();
+    saveStoreSoon();
+    return { profiles: store.profiles, activeProfile: store.activeProfile };
+  });
+  ipcMain.handle('profiles:switch', (e, id) => {
+    if (!store.profiles.some((p) => p.id === id)) return null;
+    store.activeProfile = id;
+    store.progress = store.progressByProfile[id] || (store.progressByProfile[id] = {});
+    saveStoreSoon();
+    return { progress: store.progress, activeProfile: id };
+  });
+
+  // ---------------- copia de seguridad (biblioteca, grupos, perfiles, progreso, ajustes y portadas)
+  ipcMain.handle('backup:export', async () => {
+    const r = await dialog.showSaveDialog(win, { title: L('Guardar copia de seguridad', 'Save backup'), defaultPath: `KuroPlayer-copia-${new Date().toISOString().slice(0, 10)}.kuroplayer`, filters: [{ name: L('Copia de Kuro Player', 'Kuro Player backup'), extensions: ['kuroplayer'] }] });
+    if (r.canceled || !r.filePath) return null;
+    const covers = {};
+    for (const m of Object.values(store.meta)) {
+      for (const k of ['cover', 'backdrop']) {
+        const f = m[k];
+        if (f && f.startsWith(COVER_DIR) && fs.existsSync(f)) covers[path.basename(f)] = (await fsp.readFile(f)).toString('base64');
+      }
+    }
+    const data = { app: 'KuroPlayer', format: 1, version: require('./package.json').version, date: new Date().toISOString(), coverDir: COVER_DIR,
+      store: { ...store, progress: undefined, windowState: undefined, skipCache: undefined }, covers };
+    await fsp.writeFile(r.filePath, JSON.stringify(data));
+    return { file: r.filePath, series: Object.keys(store.meta).length, covers: Object.keys(covers).length };
+  });
+  ipcMain.handle('backup:pick', async () => {
+    const r = await dialog.showOpenDialog(win, { title: L('Restaurar copia de seguridad', 'Restore backup'), properties: ['openFile'], filters: [{ name: L('Copia de Kuro Player', 'Kuro Player backup'), extensions: ['kuroplayer', 'json'] }] });
+    if (r.canceled || !r.filePaths[0]) return null;
+    const data = JSON.parse(await fsp.readFile(r.filePaths[0], 'utf8'));
+    if (data.app !== 'KuroPlayer' || !data.store) throw new Error('El archivo no es una copia de Kuro Player');
+    backupPending = data;
+    const st = data.store;
+    return { date: data.date, version: data.version, groups: (st.groups || []).length, roots: (st.roots || []).length, profiles: (st.profiles || []).length, series: Object.keys(st.meta || {}).length };
+  });
+  ipcMain.handle('backup:restore', async () => {
+    const data = backupPending; backupPending = null;
+    if (!data) return false;
+    for (const [name, b64] of Object.entries(data.covers || {})) {
+      if (/^[\w.-]+$/.test(name)) await fsp.writeFile(path.join(COVER_DIR, name), Buffer.from(b64, 'base64'));
+    }
+    let txt = JSON.stringify(data.store);
+    if (data.coverDir) { const esc = (x) => JSON.stringify(x).slice(1, -1); txt = txt.split(esc(data.coverDir)).join(esc(COVER_DIR)); }
+    const st = JSON.parse(txt);
+    const keepWin = store.windowState;
+    store = { ...DEFAULT_STORE(), ...st, settings: { ...DEFAULT_STORE().settings, ...(st.settings || {}) }, windowState: keepWin };
+    migrateGroups();
+    migrateProfiles();
+    lastScan = []; lastDiff = null;
+    saveStoreNow();
+    setupWatchers();
+    return true;
+  });
+
+  // ---------------- actualizaciones desde GitHub Releases
+  const REPO = 'G-726az/KuroPlayer';
+  const newer = (a, b) => { const x = String(a).replace(/^v/, '').split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
+  ipcMain.handle('update:check', async () => {
+    const res = await net.fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { 'User-Agent': 'KuroPlayer', Accept: 'application/vnd.github+json' } });
+    if (!res.ok) throw new Error('GitHub respondió ' + res.status);
+    const j = await res.json();
+    const cur = require('./package.json').version;
+    const asset = (j.assets || []).find((a) => /setup.*\.exe$/i.test(a.name));
+    return { current: cur, latest: String(j.tag_name || '').replace(/^v/, ''), available: newer(j.tag_name, cur), name: j.name || j.tag_name, notes: j.body || '', url: j.html_url,
+      asset: asset ? { name: asset.name, size: asset.size, url: asset.browser_download_url } : null };
+  });
+  ipcMain.handle('update:download', async (e, url, name) => {
+    if (!/^https:\/\/github\.com\/G-726az\/KuroPlayer\/releases\/download\//.test(String(url))) throw new Error('Descarga no permitida');
+    const res = await net.fetch(url, { headers: { 'User-Agent': 'KuroPlayer' } });
+    if (!res.ok || !res.body) throw new Error('No se pudo descargar (' + res.status + ')');
+    const total = +res.headers.get('content-length') || 0;
+    const dest = path.join(app.getPath('temp'), String(name || 'KuroPlayer-Setup.exe').replace(/[^\w.-]/g, '_'));
+    const out = fs.createWriteStream(dest);
+    const reader = res.body.getReader();
+    let got = 0, lastSent = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      out.write(Buffer.from(value));
+      got += value.length;
+      if (Date.now() - lastSent > 250) { lastSent = Date.now(); if (win) win.webContents.send('update:progress', { got, total }); }
+    }
+    await new Promise((r) => out.end(r));
+    updateFile = dest;
+    return { file: dest, size: got };
+  });
+  ipcMain.handle('update:install', () => {
+    if (!updateFile || !fs.existsSync(updateFile)) return false;
+    saveStoreNow();
+    spawn(updateFile, [], { detached: true, stdio: 'ignore' }).unref();
+    setTimeout(() => app.quit(), 300);
+    return true;
+  });
+  ipcMain.handle('shell:openUrl', (e, url) => { if (/^https:\/\/(github\.com\/G-726az\/KuroPlayer|ko-fi\.com\/gls726)\b/.test(String(url))) shell.openExternal(url); });
+
+  ipcMain.handle('bg:pick', async () => {
+    const r = await dialog.showOpenDialog(win, { title: L('Elegir imagen de fondo', 'Choose background image'), properties: ['openFile'], filters: [{ name: L('Imágenes', 'Images'), extensions: [...IMAGE_EXT].map((x) => x.slice(1)) }] });
+    if (r.canceled || !r.filePaths[0]) return null;
+    for (const f of await fsp.readdir(DATA_DIR)) if (/^background-\d+\./.test(f)) await fsp.unlink(path.join(DATA_DIR, f)).catch(() => {});
+    const dest = path.join(DATA_DIR, `background-${Date.now()}${path.extname(r.filePaths[0]).toLowerCase()}`);
+    await fsp.copyFile(r.filePaths[0], dest);
+    return mediaUrl(dest);
+  });
+  ipcMain.handle('win:zoom', (e, f) => { const z = Math.min(1.5, Math.max(0.7, +f || 1)); if (win) win.webContents.setZoomFactor(z); return z; });
+  ipcMain.handle('win:theme', (e, light) => {
+    try { if (win) win.setTitleBarOverlay({ color: '#00000000', symbolColor: light ? '#1b2136' : '#dfe6ff', height: 44 }); } catch (err) { /* */ }
+    if (win) win.setBackgroundColor(light ? '#eef1f8' : '#070a12');
+  });
   ipcMain.handle('win:fullscreen', (e, on) => { if (win) win.setFullScreen(!!on); return win ? win.isFullScreen() : false; });
   ipcMain.handle('win:alwaysOnTop', (e, on) => { if (win) win.setAlwaysOnTop(!!on); return !!on; });
 }

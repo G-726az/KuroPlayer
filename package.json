@@ -1,7 +1,7 @@
 {
   "name": "kuro-player",
   "productName": "Kuro Player",
-  "version": "1.7.1",
+  "version": "2.1.3",
   "description": "Kuro Player: videoteca de anime local con cartelera, reproductor moderno estilo glass y soporte para todos los formatos",
   "main": "main.js",
   "private": true,

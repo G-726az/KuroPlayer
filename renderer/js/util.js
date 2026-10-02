@@ -22,6 +22,13 @@ function fmtSize(b) {
 function fmtAgo(ts) {
   if (!ts) return '';
   const d = (Date.now() - ts) / 1000;
+  if (typeof I18N !== 'undefined' && I18N.lang === 'en') {
+    if (d < 60) return 'just now';
+    if (d < 3600) return `${Math.floor(d / 60)} min ago`;
+    if (d < 86400) return `${Math.floor(d / 3600)} h ago`;
+    if (d < 86400 * 30) return `${Math.floor(d / 86400)} days ago`;
+    return new Date(ts).toLocaleDateString('en');
+  }
   if (d < 60) return 'hace un momento';
   if (d < 3600) return `hace ${Math.floor(d / 60)} min`;
   if (d < 86400) return `hace ${Math.floor(d / 3600)} h`;

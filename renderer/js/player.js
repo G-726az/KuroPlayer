@@ -111,8 +111,11 @@ const Player = (() => {
     return (M.info && M.info.duration) || 0;
   }
   function seekTo(t, immediate) {
+    DIAG.seekStart = performance.now();
     const d = durT();
     t = clamp(t, 0, d ? Math.max(0, d - 0.3) : t);
+    // todavía se está preparando el video: el salto se guarda y se aplica en cuanto esté listo
+    if (M.loading) { M.pendingSeek = t; M.virtualT = t; S.resumeAt = 0; updateTime(); return; }
     if (!M.stream) { video.currentTime = t; return; }
     // en modo compatible cada salto reinicia la conversión: se agrupan los saltos seguidos
     M.pending = t;
@@ -157,6 +160,8 @@ const Player = (() => {
     hideNextCard();
     $('#error-box').hidden = true;
     S.errored = false;
+    // una lista de reproducción (p. ej. Favoritos) junta videos de varias carpetas: anterior/siguiente siguen esa lista
+    S.playlist = opts.playlist || (opts.keepPlaylist ? S.playlist : null);
     S.series = series;
     S.ep = ep;
     stage.classList.add('loading');
@@ -172,12 +177,14 @@ const Player = (() => {
     S.askResume = ask ? { t: start, d: (prog && prog.d) || 0 } : null;
     const seq = ++M.seq;
     M.info = null; M.stream = false; M.offset = 0; M.dur = 0; M.audio = null; M.forceVideo = false; M.label = ''; M.retried = false; M.virtualT = null;
+    M.loading = true; M.pendingSeek = null;
     clearTimeout(M.seekTimer);
     window.cinema.mediaStop();
     updateModeBadge();
     let info = null;
     try { info = await window.cinema.mediaProbe(ep.path); } catch (e) { /* sin análisis: se intenta directo */ }
     if (seq !== M.seq) return;
+    if (info && info.duration) M.dur = info.duration;
     M.info = info;
     M.dur = (info && info.duration) || 0;
     if (info) M.audio = info.plan.audio;
@@ -186,10 +193,15 @@ const Player = (() => {
       S.resumeAt = 0;
       if (start > 0 && !ask) osd(`<svg class="i"><use href="#i-refresh"/></svg>Continuando desde ${fmtTime(start)}`);
       M.seq--; // startStream incrementa el contador
-      await startStream(start, opts.autoplay !== false);
+      M.loading = false;
+      const pend = M.pendingSeek; M.pendingSeek = null;
+      await startStream(pend != null ? pend : start, opts.autoplay !== false);
     } else {
+      M.loading = false;
+      const pend = M.pendingSeek; M.pendingSeek = null;
+      if (pend != null) { S.resumeAt = pend; M.virtualT = null; }
       video.src = ep.url;
-      previewVideo.src = ep.url;
+      pvReady = false; // la vista previa de la barra se carga solo al pasar el ratón
       video.load();
     }
     video.playbackRate = video.playbackRate || 1;
@@ -204,6 +216,89 @@ const Player = (() => {
     updateNavButtons();
     updateGlowVisibility();
     if (ask && S.ep === ep && S.askResume) showResumeCard(start, S.askResume.d || M.dur);
+    loadSkips(series, ep);
+  }
+
+  // ------------------------------------------------------------ saltar opening / ending
+  const SKIP_NAMES = { op: 'Saltar opening', 'mixed-op': 'Saltar opening', ed: 'Saltar ending', 'mixed-ed': 'Saltar ending', recap: 'Saltar resumen' };
+  let skipShown = null;
+  async function loadSkips(series, ep) {
+    S.skips = []; S.skipDone = new Set(); hideSkip();
+    if (App.settings.skipMode === 'off') return;
+    const list = [];
+    const man = (series.skip || {});
+    const dur = () => durT() || (M.info && M.info.duration) || 0;
+    if (man.opStart != null && man.opEnd != null) list.push({ type: 'op', start: man.opStart, end: man.opEnd, src: 'manual' });
+    if (man.edStart != null && man.edEnd != null) list.push({ type: 'ed', fromEnd: true, start: man.edStart, end: man.edEnd, src: 'manual' });
+    const malId = series.web && (series.web.malId || (series.web.source === 'MyAnimeList' ? series.web.id : null));
+    if (malId && ep.num != null && App.settings.aniskip !== false) {
+      try {
+        const res = await window.cinema.skipTimes(malId, ep.num, Math.round(dur()));
+        if (S.ep !== ep) return;
+        for (const r of res) {
+          const t = r.type === 'mixed-op' ? 'op' : r.type === 'mixed-ed' ? 'ed' : r.type;
+          if (list.some((x) => x.type === t && x.src === 'manual')) continue;
+          // el ending se mide desde el final: se corrige si el archivo dura distinto
+          if (t === 'ed' && r.len) list.push({ type: t, fromEnd: true, start: r.start - r.len, end: r.end - r.len, src: 'AniSkip' });
+          else list.push({ type: t, start: r.start, end: r.end, src: 'AniSkip' });
+        }
+      } catch (e) { /* sin conexión */ }
+    }
+    if (S.ep === ep) S.skips = list;
+  }
+  function skipRange(x) {
+    const d = durT();
+    return x.fromEnd ? { start: d + x.start, end: Math.min(d, d + x.end) } : { start: x.start, end: x.end };
+  }
+  function checkSkip() {
+    if (!S.skips || !S.skips.length || M.virtualT != null) { hideSkip(); return; }
+    const t = curT();
+    const hit = S.skips.find((x) => { const r = skipRange(x); return t >= r.start && t < r.end - 0.8; });
+    if (!hit) { hideSkip(); return; }
+    const r = skipRange(hit);
+    const key = hit.type + hit.start;
+    const nearEnd = r.end > durT() - 25;
+    const { next } = neighbours();
+    if (App.settings.skipMode === 'auto' && !S.skipDone.has(key)) {
+      S.skipDone.add(key);
+      if (hit.type === 'ed' && nearEnd && next && App.settings.autoNext) { osd('Ending saltado'); saveProgress(true, true); loadIn(next, { startAt: 0 }); return; }
+      seekTo(r.end, true);
+      osd(`<svg class="i"><use href="#i-next"/></svg>${SKIP_NAMES[hit.type].replace('Saltar ', '')} saltado`);
+      return;
+    }
+    const btn = $('#skip-btn');
+    const label = hit.type === 'ed' && nearEnd && next ? 'Siguiente capítulo' : SKIP_NAMES[hit.type] || 'Saltar';
+    if (skipShown !== key) { skipShown = key; btn.hidden = false; $('#skip-label').textContent = label; btn.title = `${label} (tecla Intro · fuente: ${hit.src})`; }
+    btn.style.setProperty('--skip-p', Math.round(((t - r.start) / Math.max(1, r.end - r.start)) * 100) + '%');
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      hideSkip();
+      S.skipDone.add(key);
+      if (label === 'Siguiente capítulo') { saveProgress(true, true); loadIn(next, { startAt: 0 }); return; }
+      seekTo(r.end, true);
+    };
+  }
+  function hideSkip() { skipShown = null; const b = $('#skip-btn'); if (b) b.hidden = true; }
+  for (const ev of ['click', 'dblclick', 'mousedown']) $('#skip-btn').addEventListener(ev, (e) => e.stopPropagation());
+  // marcas manuales: valen para todos los capítulos de la serie (el ending se guarda relativo al final)
+  function markSkip(kind) {
+    if (!S.series) return;
+    const t = Math.round(curT() * 10) / 10, d = durT();
+    const sk = { ...(S.series.skip || {}) };
+    if (kind === 'opStart') sk.opStart = t;
+    if (kind === 'opEnd') sk.opEnd = t;
+    if (kind === 'edStart') sk.edStart = Math.round((t - d) * 10) / 10;
+    if (kind === 'edEnd') sk.edEnd = Math.round((t - d) * 10) / 10;
+    if (kind === 'clear') { delete sk.opStart; delete sk.opEnd; delete sk.edStart; delete sk.edEnd; }
+    if (sk.opStart != null && sk.opEnd != null && sk.opEnd < sk.opStart) [sk.opStart, sk.opEnd] = [sk.opEnd, sk.opStart];
+    if (sk.edStart != null && sk.edEnd != null && sk.edEnd < sk.edStart) [sk.edStart, sk.edEnd] = [sk.edEnd, sk.edStart];
+    S.series.skip = sk;
+    window.cinema.setMeta(S.series.id, { skip: sk });
+    loadSkips(S.series, S.ep);
+    const msg = { opStart: 'Inicio del opening marcado', opEnd: 'Fin del opening marcado', edStart: 'Inicio del ending marcado', edEnd: 'Fin del ending marcado', clear: 'Marcas borradas' }[kind];
+    osd(msg + (kind !== 'clear' ? ' · ' + fmtTime(t) : ''));
+    if ((kind === 'opStart' && sk.opEnd == null) || (kind === 'edStart' && sk.edEnd == null)) toast('Ahora ve al final del ' + (kind === 'opStart' ? 'opening' : 'ending') + ' y marca «fin» (clic derecho sobre el video)', 4500);
+    else if (kind === 'opEnd' || kind === 'edEnd') toast('Listo: se aplicará en todos los capítulos de «' + esc(S.series.title) + '»', 4000);
   }
 
   // ------------------------------------------------------------ ¿continuar o empezar de cero?
@@ -249,6 +344,44 @@ const Player = (() => {
   // si el usuario pulsa reproducir por su cuenta, se toma como «continuar»
   video.addEventListener('play', () => { if (S.askResume && resumeTimer) hideResumeCard(); });
 
+  // deja listo el siguiente capítulo: análisis en caché y el inicio del archivo leído del disco
+  function prefetchNext() {
+    const { next } = neighbours();
+    if (!next || App.settings.prefetch === false) return;
+    window.cinema.mediaProbe(next.path).catch(() => {});
+    fetch(next.url, { headers: { Range: 'bytes=0-6291455' } }).then((r) => r.arrayBuffer()).catch(() => {});
+  }
+
+  // ------------------------------------------------------------ panel de diagnóstico (Shift + D)
+  const DIAG = { on: false, timer: 0, seekStart: 0, lastSeek: null };
+  function toggleDiag(force) {
+    DIAG.on = force != null ? force : !DIAG.on;
+    let el = $('#diag');
+    if (!DIAG.on) { if (el) el.remove(); clearInterval(DIAG.timer); return; }
+    if (!el) { el = document.createElement('div'); el.id = 'diag'; el.className = 'diag glass'; stage.appendChild(el); }
+    const draw = () => {
+      if (!S.ep) return;
+      const q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+      let ahead = 0;
+      for (let i = 0; i < video.buffered.length; i++) if (video.buffered.start(i) <= video.currentTime + 0.5) ahead = Math.max(ahead, video.buffered.end(i) - video.currentTime);
+      const v = M.info && M.info.video, a = M.info && M.info.audios.find((x) => x.index === M.audio);
+      el.innerHTML = `<b>Diagnóstico</b><span class="x">Shift+D</span>
+        <div><i>Modo</i>${M.stream ? 'Compatible (FFmpeg)' : 'Directo'}</div>
+        ${M.stream ? `<div><i>Conversión</i>${esc(M.label || '—')}</div>` : ''}
+        <div><i>Video</i>${v ? `${esc(v.codec.toUpperCase())} ${v.width}×${v.height}${/10/.test(v.pix) ? ' 10 bits' : ''}` : '—'}</div>
+        <div><i>Audio</i>${a ? `${esc(a.codec.toUpperCase())} ${a.channels}ch` : '—'}</div>
+        <div><i>Contenedor</i>${esc(((M.info && M.info.container) || '').split(',')[0].toUpperCase() || S.ep.ext.toUpperCase())}</div>
+        <div><i>Búfer adelante</i>${ahead.toFixed(1)} s</div>
+        <div><i>Cuadros perdidos</i>${q ? `${q.droppedVideoFrames} de ${q.totalVideoFrames}` : '—'}</div>
+        <div><i>Último salto</i>${DIAG.lastSeek != null ? DIAG.lastSeek + ' ms' : '—'}</div>
+        <div><i>Color GPU</i>${S.useGL ? (App.settings.enhance && App.settings.enhance !== 'off' ? 'WebGL + mejora' : 'WebGL') : 'CSS'}</div>
+        <div><i>Archivo</i>${fmtSize(S.ep.size)}</div>`;
+    };
+    draw();
+    clearInterval(DIAG.timer);
+    DIAG.timer = setInterval(draw, 500);
+  }
+
   function updateNavButtons() {
     const { prev, next } = neighbours();
     $('#c-prev').disabled = !prev;
@@ -256,16 +389,20 @@ const Player = (() => {
     $('#pl-prev').disabled = !prev;
     $('#pl-next').disabled = !next;
   }
+  // carga otro video de la lista actual (la carpeta, o la lista de reproducción si hay una)
+  function loadIn(ep, opts = {}) {
+    return load(S.playlist ? S.playlist.ownerOf(ep) : S.series, ep, { ...opts, keepPlaylist: true });
+  }
   function neighbours() {
     if (!S.series || !S.ep) return {};
-    const list = S.series.episodes;
+    const list = (S.playlist || S.series).episodes;
     const i = list.findIndex((e) => e.id === S.ep.id);
     return { prev: list[i - 1] || null, next: list[i + 1] || null };
   }
-  function playNext() { const { next } = neighbours(); if (next) load(S.series, next, { startAt: 0 }); else toast('No hay más capítulos'); }
+  function playNext() { const { next } = neighbours(); if (next) loadIn(next, { startAt: 0 }); else toast('No hay más capítulos'); }
   function playPrev() {
     if (curT() > 5) { seekTo(0, true); return; }
-    const { prev } = neighbours(); if (prev) load(S.series, prev, { startAt: 0 });
+    const { prev } = neighbours(); if (prev) loadIn(prev, { startAt: 0 });
   }
 
   // ------------------------------------------------------------ eventos del video
@@ -299,15 +436,21 @@ const Player = (() => {
     return true;
   }
   video.addEventListener('loadeddata', () => { stage.classList.remove('loading'); renderFrame(); });
+  const seekDone = () => { if (DIAG.seekStart) { DIAG.lastSeek = Math.round(performance.now() - DIAG.seekStart); DIAG.seekStart = 0; } };
+  video.addEventListener('playing', seekDone);
+  video.addEventListener('seeked', () => { if (video.readyState >= 3) seekDone(); });
   video.addEventListener('waiting', () => stage.classList.add('loading'));
   video.addEventListener('playing', () => stage.classList.remove('loading'));
   video.addEventListener('canplay', () => stage.classList.remove('loading'));
   video.addEventListener('seeked', renderFrame);
-  video.addEventListener('play', () => { updatePlayIcons(); kickIdle(); document.body.classList.remove('paused'); });
-  video.addEventListener('pause', () => { updatePlayIcons(); saveProgress(true); shell.classList.remove('idle'); document.body.classList.add('paused'); });
+  video.addEventListener('play', () => { updatePlayIcons(); kickIdle(); document.body.classList.remove('paused'); document.body.classList.add('playing'); });
+  video.addEventListener('pause', () => { updatePlayIcons(); saveProgress(true); shell.classList.remove('idle'); document.body.classList.add('paused'); document.body.classList.remove('playing'); });
   video.addEventListener('timeupdate', () => {
     updateTime();
     if (Date.now() - S.lastSaved > 4000) saveProgress();
+    checkSkip();
+    const left = durT() - curT();
+    if (left > 0 && left < 60 && S.ep && S.prefetchedFor !== S.ep.id) { S.prefetchedFor = S.ep.id; prefetchNext(); }
     const d = video.duration;
     if (App.settings.autoNext && d && d - video.currentTime < 0.6 && !video.paused) { /* ended se encarga */ }
   });
@@ -383,16 +526,34 @@ const Player = (() => {
   // ------------------------------------------------------------ render (GPU) + subtítulos + brillo ambiental
   function renderFrame() {
     if (S.useGL) {
-      const ok = gl.render();
-      stage.classList.toggle('gl', ok || stage.classList.contains('gl'));
+      // si los ajustes se pueden hacer con filtros CSS, van por ahí (el compositor los aplica casi gratis);
+      // WebGL solo para nitidez, viñeta, temperatura, gamma, mejora de imagen o la comparación
+      const neutral = gl.isNeutral(), viaCss = !neutral && App.gpuMode !== 'quality' && cssCapable();
+      const ok = !neutral && !viaCss && gl.render();
+      stage.classList.toggle('gl', !!ok);
+      setVideoFilter(viaCss ? cssFilterOf(gl.params) : '');
       if (!gl.ok) { S.useGL = false; stage.classList.remove('gl'); applyCssFallback(); }
     }
     updateSubs();
     const now = performance.now();
-    if (glow.classList.contains('on') && now - S.lastGlow > 200 && video.readyState >= 2) {
+    const glowEvery = App.gpuMode === 'eco' ? 600 : App.gpuMode === 'balanced' ? 400 : 200;
+    if (glow.classList.contains('on') && now - S.lastGlow > glowEvery && video.readyState >= 2) {
       S.lastGlow = now;
-      try { glowCtx.drawImage(S.useGL ? glCanvas : video, 0, 0, 32, 18); } catch (e) { /* */ }
+      // en calidad máxima el brillo sale del cuadro ya procesado; si no, del video directo (copiar el lienzo WebGL cuesta más)
+      try { drawGlow(App.gpuMode === 'quality' && stage.classList.contains('gl') ? glCanvas : video); } catch (e) { /* */ }
     }
+  }
+  // Luz ambiental: el cuadro se reduce a 32×18 y se difumina dentro de ese lienzo diminuto (casi gratis);
+  // antes se difuminaba con CSS a tamaño de pantalla, lo que en gráficas integradas costaba ~25 % de GPU.
+  // El lienzo tiene un margen alrededor para que el brillo se desvanezca hacia los bordes.
+  function drawGlow(src) {
+    const c = glowCtx.canvas;
+    if (c.width !== 48) { c.width = 48; c.height = 27; }
+    const w = glow.offsetWidth || 1200;
+    const cssBlur = 30 + (S.glow == null ? 0.5 : S.glow) * 80;
+    glowCtx.clearRect(0, 0, 48, 27);
+    glowCtx.filter = `blur(${(cssBlur * 32 / w).toFixed(2)}px)`;
+    glowCtx.drawImage(src, 8, 4.5, 32, 18);
   }
   function frameLoop() {
     renderFrame();
@@ -403,9 +564,16 @@ const Player = (() => {
   // respaldo: si no llegan cuadros (p. ej. ventana oculta), sigue actualizando subtítulos
   setInterval(() => { if (!video.paused && performance.now() - S.lastFrame > 400) renderFrame(); }, 250);
 
+  function cssFilterOf(p) {
+    return `brightness(${1 + p.brightness * 1.5}) contrast(${p.contrast}) saturate(${p.saturation * (1 + p.vibrance * 0.3)}) hue-rotate(${p.hue}deg)`;
+  }
+  function cssCapable() {
+    const p = gl.params, z = (k, d = 0.005) => Math.abs(p[k] - COLOR_DEFAULTS[k]) < d;
+    return z('sharpness', 0.02) && z('vignette', 0.02) && z('temperature', 0.02) && z('tint', 0.02) && z('gamma', 0.03) && !gl.enhance && gl.split < 0;
+  }
+  function setVideoFilter(f) { if (S.videoFilter !== f) { S.videoFilter = f; video.style.filter = f; } }
   function applyCssFallback() {
-    const p = gl.params;
-    video.style.filter = `brightness(${1 + p.brightness * 1.5}) contrast(${p.contrast}) saturate(${p.saturation * (1 + p.vibrance * 0.3)}) hue-rotate(${p.hue}deg)`;
+    setVideoFilter(cssFilterOf(gl.params));
   }
 
   // ------------------------------------------------------------ subtítulos
@@ -594,7 +762,32 @@ const Player = (() => {
     renderFrame();
     if (!cp.hidden) buildColorPanel();
   }
+  // mejora de imagen: escalado a la resolución de pantalla + líneas y bordes más definidos
+  function enhanceLevel() {
+    const k = App.settings.enhance || 'off';
+    return App.settings.perfMode || App.gpuMode === 'eco' ? 'off' : (ENHANCE_LEVELS[k] !== undefined ? k : 'off');
+  }
+  function applyEnhance() {
+    gl.enhance = S.useGL ? ENHANCE_LEVELS[enhanceLevel()] : null;
+    if (video.paused) renderFrame();
+    buildEnhance();
+  }
+  function buildEnhance() {
+    const cur = enhanceLevel();
+    $('#cp-enhance').innerHTML = Object.entries(ENHANCE_LEVELS).map(([k, v]) =>
+      `<button class="chip ${cur === k ? 'active' : ''}" data-enh="${k}">${v ? esc(v.name) : 'Apagada'}</button>`).join('');
+  }
+  function setEnhance(k) {
+    if (!S.useGL) { toast('La mejora de imagen requiere aceleración por GPU'); return; }
+    if (App.settings.perfMode && k !== 'off') { toast('Desactiva el modo rendimiento para usar la mejora de imagen'); return; }
+    if (App.gpuMode === 'eco' && k !== 'off') { toast('La mejora de imagen no se usa en el modo de ahorro de GPU'); return; }
+    App.saveSettings({ enhance: k });
+    applyEnhance();
+    osd(`<svg class="i"><use href="#i-color"/></svg>Mejora de imagen: ${ENHANCE_LEVELS[k] ? esc(ENHANCE_LEVELS[k].name) : 'apagada'}`);
+  }
+  $('#cp-enhance').addEventListener('click', (e) => { const b = e.target.closest('[data-enh]'); if (b) setEnhance(b.dataset.enh); });
   function buildColorPanel() {
+    buildEnhance();
     const scope = currentColorScope();
     $('#cp-scope').textContent = scope === 'series' ? 'Solo esta serie' : 'Global (todas las series)';
     $('#cp-series').checked = scope === 'series';
@@ -819,6 +1012,13 @@ const Player = (() => {
       { icon: 'i-camera', label: 'Guardar captura', action: screenshot },
       { icon: 'i-image', label: 'Usar este cuadro como portada', action: () => App.coverFromFrame() },
       '-',
+      { icon: 'i-next', label: 'El opening empieza aquí', action: () => markSkip('opStart') },
+      { icon: 'i-next', label: 'El opening termina aquí', action: () => markSkip('opEnd') },
+      { icon: 'i-next', label: 'El ending empieza aquí', action: () => markSkip('edStart') },
+      { icon: 'i-next', label: 'El ending termina aquí', action: () => markSkip('edEnd') },
+      ...(S.series && S.series.skip && Object.keys(S.series.skip).length ? [{ icon: 'i-trash', label: 'Borrar marcas de opening/ending', action: () => markSkip('clear') }] : []),
+      { icon: 'i-info', label: DIAG.on ? 'Ocultar diagnóstico' : 'Diagnóstico de reproducción (Shift+D)', action: () => toggleDiag() },
+      '-',
       ...App.openWithItems(S.ep.path, curT()),
       { icon: 'i-folder', label: 'Mostrar en el explorador', action: () => window.cinema.showInFolder(S.ep.path) },
     ]);
@@ -840,16 +1040,18 @@ const Player = (() => {
   const tip = $('#prog-tip');
   const tipCtx = $('#tip-canvas').getContext('2d');
   const previewVideo = document.createElement('video');
-  previewVideo.muted = true; previewVideo.crossOrigin = 'anonymous'; previewVideo.preload = 'auto';
-  let pvBusy = false, pvWant = -1, dragging = false;
+  previewVideo.muted = true; previewVideo.crossOrigin = 'anonymous'; previewVideo.preload = 'metadata';
+  let pvBusy = false, pvWant = -1, dragging = false, pvReady = false;
   previewVideo.addEventListener('seeked', () => {
     try { tipCtx.drawImage(previewVideo, 0, 0, 192, 108); tip.classList.remove('no-img'); } catch (e) { tip.classList.add('no-img'); }
     pvBusy = false;
     if (pvWant >= 0 && Math.abs(pvWant - previewVideo.currentTime) > 1) seekPreview(pvWant);
   });
   previewVideo.addEventListener('error', () => tip.classList.add('no-img'));
+  previewVideo.addEventListener('loadedmetadata', () => { if (pvWant >= 0) { const w = pvWant; pvWant = -1; seekPreview(w); } });
   function seekPreview(t) {
-    if (M.stream) { tip.classList.add('no-img'); return; }
+    if (M.stream || !S.ep) { tip.classList.add('no-img'); return; }
+    if (!pvReady) { pvReady = true; previewVideo.src = S.ep.url; pvBusy = false; }
     pvWant = t;
     if (pvBusy || previewVideo.readyState < 1) return;
     pvBusy = true; pvWant = -1;
@@ -905,9 +1107,9 @@ const Player = (() => {
     S.nextTimer = setInterval(() => {
       S.nextLeft--;
       $('#next-count').textContent = S.nextLeft;
-      if (S.nextLeft <= 0) { hideNextCard(); load(S.series, next, { startAt: 0 }); }
+      if (S.nextLeft <= 0) { hideNextCard(); loadIn(next, { startAt: 0 }); }
     }, 1000);
-    $('#next-go').onclick = () => { hideNextCard(); load(S.series, next, { startAt: 0 }); };
+    $('#next-go').onclick = () => { hideNextCard(); loadIn(next, { startAt: 0 }); };
   }
   function hideNextCard() { clearInterval(S.nextTimer); $('#next-card').hidden = true; }
   $('#next-cancel').onclick = hideNextCard;
@@ -920,11 +1122,18 @@ const Player = (() => {
       if (e.key === 'Escape') { e.preventDefault(); resumeChoice(true); return true; }
     }
     if (!S.ep || S.mode === 'hidden') return false;
+    if (e.key === 'Enter' && !$('#skip-btn').hidden) { $('#skip-btn').click(); return true; }
     const k = e.key;
     const long = e.shiftKey;
     const step = long ? (App.settings.seekStepLong || 30) : (App.settings.seekStep || 5);
     const vstep = (App.settings.volumeStep || 5) / 100;
     if (e.ctrlKey && (k === 's' || k === 'S')) { screenshot(); return true; }
+    if (e.shiftKey && (k === 'd' || k === 'D')) { toggleDiag(); return true; }
+    if (e.shiftKey && (k === 'e' || k === 'E')) {
+      const keys = Object.keys(ENHANCE_LEVELS), i = keys.indexOf(enhanceLevel());
+      setEnhance(keys[(i + 1) % keys.length]);
+      return true;
+    }
     if (e.ctrlKey || e.altKey || e.metaKey) return false;
     switch (k) {
       case ' ': case 'k': case 'K': togglePlay(); return true;
@@ -962,6 +1171,7 @@ const Player = (() => {
   }
 
   function close() {
+    document.body.classList.remove('playing');
     saveProgress(true);
     video.pause();
     hideNextCard();
@@ -975,6 +1185,7 @@ const Player = (() => {
     previewVideo.removeAttribute('src');
     S.ep = null;
     S.series = null;
+    S.playlist = null;
     App.onClosed();
   }
 
@@ -986,19 +1197,30 @@ const Player = (() => {
     S.lastGlowOn = App.settings.glowLevel > 0 ? App.settings.glowLevel : 0.5;
     applyGlow(App.settings.glowLevel != null ? App.settings.glowLevel : 0.5);
     if (!gl.ok) { S.useGL = false; console.warn('WebGL no disponible, usando filtros CSS'); }
+    applyGpuMode();
+  }
+  function applyGpuMode() {
+    const was = S.useGL;
+    S.useGL = gl.ok && App.gpuMode !== 'eco';
+    if (!S.useGL) { stage.classList.remove('gl'); applyCssFallback(); }
+    else if (!was) setVideoFilter('');
+    if (!S.useGL && gl.split >= 0) setCompare(false);
+    applyEnhance();
+    renderFrame();
   }
   addEventListener('beforeunload', () => saveProgress(true));
 
   return {
-    init, load, setMode, handleKey, close, togglePlay, playNext, playPrev, saveProgress, applyColorForSeries,
+    init, load, setMode, handleKey, close, togglePlay, playNext, playPrev, saveProgress, applyColorForSeries, applyEnhance, applyGpuMode,
     get state() { return S; }, get video() { return video; }, get mode() { return S.mode; },
-    currentTime: () => curT(), get media() { return M; },
+    currentTime: () => curT(), get media() { return M; }, seek: (t) => seekTo(t, true),
     grabFrame(w = 480) {
       if (video.readyState < 2) return null;
       const c = document.createElement('canvas');
       const h = Math.round(w * (video.videoHeight / video.videoWidth));
       c.width = w; c.height = h;
-      c.getContext('2d').drawImage(S.useGL && stage.classList.contains('gl') ? glCanvas : video, 0, 0, w, h);
+      const useGl = stage.classList.contains('gl') && gl.render();
+      c.getContext('2d').drawImage(useGl ? glCanvas : video, 0, 0, w, h);
       return c.toDataURL('image/jpeg', 0.9);
     },
     grabPoster() {
@@ -1007,7 +1229,9 @@ const Player = (() => {
       const h = vh, w = Math.min(vw, Math.round(h * 2 / 3));
       const c = document.createElement('canvas');
       c.width = 600; c.height = 900;
-      c.getContext('2d').drawImage(S.useGL && stage.classList.contains('gl') ? glCanvas : video, (vw - w) / 2, 0, w, h, 0, 0, 600, 900);
+      const useGl = stage.classList.contains('gl') && gl.render();
+      const src = useGl ? glCanvas : video, k = useGl ? glCanvas.width / vw : 1;
+      c.getContext('2d').drawImage(src, (vw - w) / 2 * k, 0, w * k, h * k, 0, 0, 600, 900);
       return c.toDataURL('image/jpeg', 0.9);
     },
     refreshGlow: updateGlowVisibility,
