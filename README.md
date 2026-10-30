@@ -21,6 +21,11 @@
 
 ---
 
+## 🎬 KuroPlayer
+
+https://github.com/user-attachments/assets/ee166657-f74e-4fea-8a08-7fa9c13c9725
+
+
 ## ✨ ¿Qué es?
 
 **Kuro Player** convierte tus carpetas de anime (y de películas o series) en una cartelera como la de un servicio de streaming, pero **100 % local**: sin cuentas, sin anuncios y sin subir nada a internet. Cada subcarpeta es una serie y sus videos son los capítulos. Lo abres, eliges y sigues viendo justo donde lo dejaste.
